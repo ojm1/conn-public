@@ -1811,6 +1811,7 @@ def chat_list(window, check, gui, hosts, agent_state, Gtk) -> None:
         window.clear_filter()
 
         servers_tab(window, check, gui, hosts, agent_state, Gtk, fakes)
+        rebuilds_let_go(window, check, gui, agent_state, Gtk, frame)
 
         # -- keys -----------------------------------------------------------
         ctrl = Gdk.ModifierType.CONTROL_MASK
@@ -3734,6 +3735,95 @@ def servers_tab(window, check, gui, hosts, agent_state, Gtk, fakes) -> None:
         window.order = saved_order
         window.set_sidebar_mode("chats")
         window.filter.set_text("")
+        window.render()
+
+
+def rebuilds_let_go(window, check, gui, agent_state, Gtk, frame) -> None:
+    """The 16 Nov freeze: a sidebar rebuild that kept every row it threw
+    away, and one that never finished while a right-click menu was open.
+
+    Rows were held by their own right-click gesture's handler (r=row) and
+    the working badge by its own draw func -- cycles through C that Python's
+    collector cannot see -- so each rebuild leaked the whole list, about
+    1 MB in the Chats tab and half that in Servers, and a shape that kept
+    changing ran the window into gigabytes. Here the shape is made to
+    change on every frame, which is the worst case, and what is alive
+    afterwards is counted.
+    """
+    import gc
+    import signal
+
+    def live(kind):
+        gc.collect()
+        return sum(1 for o in gc.get_objects() if isinstance(o, kind))
+
+    def rss():
+        with open("/proc/self/status") as status:
+            for line in status:
+                if line.startswith("VmRSS"):
+                    return int(line.split()[1]) / 1024
+        return 0.0
+
+    def churn(frames):
+        for i in range(frames):
+            window.frames.put(("conntest-app", frame(
+                "conntest-app", {"telegram": BUSY.format(glyph="✶✷"[i % 2]),
+                                 "shell": f"$ ls\nfile{i}\n$ "})))
+            window.shape = None     # a shape that changes on every frame
+            window.drain_frames()
+
+    saved_expanded = set(window.expanded)
+    try:
+        for mode in ("servers", "chats"):
+            window.set_sidebar_mode(mode)
+            if mode == "servers":
+                window.set_expanded("conntest-app", True)
+            churn(20)
+            rows0, badges0, mb0 = (live(Gtk.ListBoxRow),
+                                   live(gui.WorkingBadge), rss())
+            churn(300)
+            rows1, badges1, mb1 = (live(Gtk.ListBoxRow),
+                                   live(gui.WorkingBadge), rss())
+            check(f"300 rebuilds in the {mode} tab leave no rows behind",
+                  rows1 <= rows0 + 2 and badges1 <= badges0 + 2,
+                  f"rows {rows0} -> {rows1}, badges {badges0} -> {badges1}")
+            check(f"and the {mode} tab's memory stays flat over them",
+                  mb1 - mb0 < 40, f"rss {mb0:.0f} -> {mb1:.0f} MB")
+
+        # A rebuild under an open right-click menu: the menu is a child of
+        # the list but not a row, and remove-until-empty spun on it forever.
+        window.set_sidebar_mode("servers")
+        server = next(r for r in rows(window)
+                      if getattr(r, "server", None) == "conntest-app")
+        window.host_menu(server, "conntest-app", 5, 5)
+        menu = window.list.get_last_child()
+
+        def stuck(*_a):
+            raise TimeoutError("render() did not return")
+        old = signal.signal(signal.SIGALRM, stuck)
+        signal.alarm(5)
+        try:
+            window.shape = None
+            window.render()
+            finished = True
+        except TimeoutError:
+            finished = False
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old)
+        check("a rebuild with a right-click menu open finishes",
+              finished and isinstance(menu, Gtk.Popover))
+        check("and leaves the menu where it was",
+              menu.get_parent() is window.list
+              and any(getattr(r, "server", None) == "conntest-app"
+                      for r in rows(window)))
+        menu.popdown()
+        if menu.get_parent() is not None:
+            menu.unparent()
+    finally:
+        window.expanded = saved_expanded
+        gui.save_expanded(window.expanded)
+        window.set_sidebar_mode("chats")
         window.render()
 
 

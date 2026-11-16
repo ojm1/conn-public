@@ -493,7 +493,10 @@ class WorkingBadge(Gtk.DrawingArea):
         self.angle = 0.0
         self.tick = 0
         self.spinning = False
-        self.set_draw_func(self._draw)
+        # Unbound, so the draw func the widget owns does not own the widget
+        # back: a bound method made a cycle through C that kept every badge
+        # of every row a rebuild threw away (the widget is passed in anyway).
+        self.set_draw_func(WorkingBadge._draw)
 
     def get_spinning(self) -> bool:
         return self.spinning
@@ -503,19 +506,19 @@ class WorkingBadge(Gtk.DrawingArea):
             return
         self.spinning = spinning
         if spinning:
-            self.tick = self.add_tick_callback(self._advance)
+            self.tick = self.add_tick_callback(WorkingBadge._advance)
         elif self.tick:
             self.remove_tick_callback(self.tick)
             self.tick = 0
         self.queue_draw()
 
-    def _advance(self, _widget, clock) -> bool:
+    def _advance(self, clock) -> bool:     # self is the widget GTK passes
         self.angle = (clock.get_frame_time() / 1_000_000 * 2 * 3.14159
                       / 0.9) % (2 * 3.14159)
         self.queue_draw()
         return GLib.SOURCE_CONTINUE
 
-    def _draw(self, _area, cr, width, height) -> None:
+    def _draw(self, cr, width, height) -> None:   # self is the area
         import math
         cx, cy = width / 2, height / 2
         cr.set_source_rgba(self.disc.red, self.disc.green, self.disc.blue, 1)
@@ -6489,8 +6492,17 @@ class Conn(Gtk.ApplicationWindow):
             # is left is a lost highlight, not a session owed a selection.
             wanted = None
 
-        while (child := self.list.get_first_child()) is not None:
-            self.list.remove(child)
+        # Rows only. A right-click menu is parented to the list too (see
+        # popup()), and ListBox.remove() refuses a child that is not a row:
+        # "remove the first child until there is none" spun forever on an
+        # open menu -- 100% CPU, the window frozen -- whenever the shape
+        # changed under it.
+        child = self.list.get_first_child()
+        while child is not None:
+            after = child.get_next_sibling()
+            if isinstance(child, Gtk.ListBoxRow):
+                self.list.remove(child)
+            child = after
         self.widgets.clear()
         self.chat_widgets.clear()
         self.host_widgets.clear()
@@ -6949,8 +6961,13 @@ class Conn(Gtk.ApplicationWindow):
 
         menu = Gtk.GestureClick()
         menu.set_button(3)
-        menu.connect("pressed",
-                     lambda _g, _n, x, y, r=row, h=host: self.host_menu(r, h, x, y))
+        # The row is the gesture's widget, asked for when it fires. Held in
+        # the handler instead (r=row), it made a cycle through C that
+        # Python's collector cannot see -- row -> gesture -> closure -> row
+        # -- so every row a rebuild threw away stayed alive, children and
+        # all: about 1 MB a rebuild, forever. See render().
+        menu.connect("pressed", lambda g, _n, x, y, h=host:
+                     self.host_menu(g.get_widget(), h, x, y))
         row.add_controller(menu)
         row.set_child(outer)
         return row
@@ -7074,8 +7091,9 @@ class Conn(Gtk.ApplicationWindow):
 
         menu = Gtk.GestureClick()
         menu.set_button(3)
-        menu.connect("pressed",
-                     lambda _g, _n, x, y, r=row: self.row_menu(r, x, y))
+        # The row from the gesture, not held: see _server_row.
+        menu.connect("pressed", lambda g, _n, x, y:
+                     self.row_menu(g.get_widget(), x, y))
         row.add_controller(menu)
 
         row.set_child(box)
@@ -7302,8 +7320,9 @@ class Conn(Gtk.ApplicationWindow):
 
         menu = Gtk.GestureClick()
         menu.set_button(3)
-        menu.connect("pressed",
-                     lambda _g, _n, x, y, r=row: self.row_menu(r, x, y))
+        # The row from the gesture, not held: see _server_row.
+        menu.connect("pressed", lambda g, _n, x, y:
+                     self.row_menu(g.get_widget(), x, y))
         row.add_controller(menu)
         row.set_child(box)
         return row
