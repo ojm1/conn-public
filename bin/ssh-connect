@@ -1,0 +1,139 @@
+#!/bin/bash
+# Connect to a host and attach to a persistent tmux session on the remote.
+# Usage: ssh-connect <host> [session-name]
+#
+# The session keeps running on the server if the link drops, your laptop
+# sleeps, or you close the window -- reconnect and you are back where you were.
+#
+# Uses mosh when both ends have it, because it echoes your keystrokes locally
+# instead of waiting a round trip for the server to say what you typed. On a
+# high-latency link that is the difference between typing
+# and dictating. Set SSH_CONNECT_NO_MOSH=1 to force plain ssh.
+
+set -uo pipefail
+
+host=${1:?usage: ssh-connect <host> [session-name]}
+session=${2:-claude}
+
+# The host lands inside the remote command string, in the tmux status bar,
+# and in a cache file name, so a name that could break out of any of those
+# is refused rather than rewritten -- silently fixing it up would connect
+# somewhere the user did not type. Only what genuinely breaks is refused:
+# a leading dash reads as an option to mosh, whitespace and control
+# characters smuggle words and escape sequences, quote and expansion
+# characters would step out of the sh -c wrapper below or run commands from
+# the status bar (tmux expands #(...) there), and / walks the mosh cache
+# file out of its directory. Everything else the panel can list must
+# attach: keep this in step with _usable_alias in hosts.py, whose rejects
+# ('*?!/' and a leading dash) are a subset of these. The doubled backslash
+# is one member: the unquoted expansion is a glob bracket, where a lone
+# backslash only escapes what follows. The session name is different: tmux
+# is going to create whatever we ask for, so a filtered name still names
+# the session you get.
+unsafe=$' \t\'"\\\\`$!#*?/'
+if [[ $host == -* || $host == *[$unsafe]* || $host == *[[:cntrl:]]* ]]; then
+  printf 'ssh-connect: unusable host name: %q\n' "$host" >&2
+  exit 2
+fi
+
+# Keep the session name shell-safe
+session=${session//[^A-Za-z0-9_-]/_}
+
+# Name the terminal window. Without this every window is titled "foot" and a
+# screen full of them is unreadable. tmux leaves the title alone (set-titles is
+# off by default), so what we set here survives the attach.
+printf '\033]0;%s\007' "$host/$session"
+
+# On attach, tmux flashes how to get back out. Without this the panel's hint
+# vanishes the moment the remote session takes the screen, and there is nothing
+# left telling you which key returns you to the list.
+#
+# The banner's five seconds come from setting display-time rather than from
+# "display-message -d 5000": -d arrived in tmux 3.2, and because these commands
+# are chained with \;, an older tmux rejects the whole chain -- so the session
+# never starts, ssh exits, and the new window shuts instantly. display-time is
+# as old as tmux. Debian 10 / Ubuntu 20.04 still ship 3.0a.
+banner="F12  or  ctrl-b d   =   back to the server panel"
+
+# The remote LOGIN shell parses this whole string before any sh exists --
+# and the login shell can be fish or tcsh, which do not read POSIX 'if'.
+# One shape reads identically under all of them: exec sh -c '<script>',
+# provided the single-quoted script contains no single quote (ends the word
+# for sh and csh), no backslash (fish gives it meaning inside single
+# quotes), no exclamation mark (csh expands history inside quotes) and no
+# newline (csh cannot quote one). So it is built to contain none of the
+# four: tmux's separator is the argument ";" rather than \;, inner quoting
+# is all double quotes, and everything spliced in is already confined --
+# $session to [A-Za-z0-9_-] above, $host by the guard above, $banner by
+# being this file's own literal.
+script="if command -v tmux >/dev/null 2>&1; then exec tmux new-session -A -s \"$session\" \";\" bind-key -n F12 detach-client \";\" set-option -t \"$session\" status-left-length 40 \";\" set-option -t \"$session\" status-left \"[$host/$session] \" \";\" set-option -t \"$session\" display-time 5000 \";\" display-message \"$banner\"; else echo \"(tmux not installed on this host -- plain shell)\"; echo \"(type exit to return to the panel)\"; exec \$SHELL -l; fi"
+
+# Enforced, not assumed: an edit that lets one of the four back in should
+# fail here, not on some fish user's server.
+case $script in
+  *[\'\\!$'\n']*)
+    echo "ssh-connect: bug: the remote script no longer parses in every login shell" >&2
+    exit 70;;
+esac
+
+remote="exec sh -c '$script'"
+
+# Asking the server whether it has mosh costs a round trip, which is exactly
+# what we are trying to avoid, so the answer is cached for a week.
+CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/conn"
+
+has_mosh_server() {
+  local cache="$CACHE/$1.mosh"
+  mkdir -p "$(dirname "$cache")"
+
+  if [[ -f $cache ]] && [[ $(find "$cache" -mtime -7 2>/dev/null) ]]; then
+    [[ $(cat "$cache") == yes ]]
+    return
+  fi
+
+  local answer=no
+  # Through sh, same as the attach command: this too is parsed by the login
+  # shell, and tcsh has neither 'command' nor '2>&1'.
+  if ssh -o BatchMode=yes -o ConnectTimeout=6 -- "$1" \
+       "exec sh -c 'command -v mosh-server >/dev/null 2>&1'" 2>/dev/null; then
+    answer=yes
+  fi
+  printf '%s' "$answer" > "$cache"
+  [[ $answer == yes ]]
+}
+
+# A launch that dies takes its own window with it, and the error goes with the
+# window -- which is exactly how a tmux too old for "display-message -d" looked
+# like the key simply doing nothing. So the connection is no longer exec'd: the
+# script stays alive behind it to notice a fast failure, keep the window open
+# with the reason on screen, and leave a note the panel can read.
+errors=$(mktemp)
+trap 'rm -f "$errors"' EXIT
+started=$SECONDS
+
+if [[ ${SSH_CONNECT_NO_MOSH:-0} != 1 ]] && command -v mosh >/dev/null 2>&1 \
+   && has_mosh_server "$host"; then
+  mosh "$host" -- bash -lc "$remote" 2> >(tee "$errors" >&2)
+else
+  ssh -t -- "$host" "$remote" 2> >(tee "$errors" >&2)
+fi
+status=$?
+
+# A session you actually used and then left exits 0, or non-zero for whatever
+# you last ran in it -- neither is a launch failure. A launch failure is a
+# non-zero exit that happens before you could have done anything at all.
+if (( status != 0 )) && (( SECONDS - started < 5 )); then
+  reason=$(grep -v '^[[:space:]]*$' "$errors" | tail -1)
+  reason=${reason:-"exited immediately (status $status)"}
+
+  mkdir -p "$CACHE"
+  printf '%s\t%s/%s\t%s\n' "$(date +%s)" "$host" "$session" "$reason" \
+    > "$CACHE/last-launch-error"
+
+  printf '\n%s\n' "ssh-connect: $host/$session did not start." >&2
+  printf '%s\n\n' "  $reason" >&2
+  read -rsn1 -t 120 -p "press any key to close this window " || true
+  exit "$status"
+fi
+
+exit "$status"

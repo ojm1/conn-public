@@ -1,0 +1,95 @@
+#!/bin/bash
+# Mount a remote host as a local folder (drag-and-drop in Nautilus, edit remote
+# files with local tools). This is the SFTP replacement.
+#
+# Mountpoints go under $XDG_RUNTIME_DIR/conn/mnt, not ~/mnt: they hold nothing,
+# so a folder in the home directory for every server ever looked at was
+# clutter -- and the runtime directory is tmpfs, so a reboot with a mount still
+# up cannot leave an empty one behind.
+#
+# Usage:  ssh-mount <host> [remote-path]     default remote-path: the login dir
+#         ssh-mount -u <host>                unmount
+set -uo pipefail
+
+root="${XDG_RUNTIME_DIR:-$HOME/.cache}/conn/mnt"
+
+# Whether the kernel's mount table lists $1. Not mountpoint(1): that stats
+# the path, which hangs on a hung sshfs and says "not mounted" for a dead one
+# (Transport endpoint is not connected) -- the dead mount being exactly the
+# one -u must still release.
+listed() {
+  awk -v mnt="$1" '$2 == mnt { found = 1 } END { exit !found }' /proc/self/mounts
+}
+
+if ! command -v sshfs >/dev/null 2>&1; then
+  echo "sshfs is not installed. Install it with:  omarchy pkg add sshfs"
+  exit 1
+fi
+
+if [[ ${1:-} == "-u" || ${1:-} == "--unmount" ]]; then
+  host=${2:?usage: ssh-mount -u <host>}
+  mnt="$root/$host"
+
+  if ! listed "$mnt"; then
+    echo "not mounted: $mnt"
+    rmdir "$mnt" 2>/dev/null
+    exit 0
+  fi
+
+  # A mount can be briefly busy right after use. Try clean first, then lazy,
+  # which detaches now and releases once the last user lets go.
+  if ! err=$(fusermount3 -u "$mnt" 2>&1); then
+    if ! err=$(fusermount3 -uz "$mnt" 2>&1); then
+      echo "could not unmount $mnt: $err" >&2
+      echo "something is still using it -- try:  fuser -vm $mnt" >&2
+      exit 1
+    fi
+  fi
+
+  echo "unmounted $mnt"
+  rmdir "$mnt" 2>/dev/null
+  exit 0
+fi
+
+host=${1:?usage: ssh-mount <host> [remote-path]}
+remote=${2:-}
+mnt="$root/$host"
+
+if listed "$mnt"; then
+  if mountpoint -q "$mnt"; then
+    echo "already mounted: $mnt"
+    exit 0
+  fi
+  # In the table but not answering: the sshfs behind it died and left the
+  # mountpoint wedged. Nothing can be mounted over it until it is released,
+  # and fusermount3 works on a dead mount where everything else fails.
+  fusermount3 -u "$mnt" 2>/dev/null || fusermount3 -uz "$mnt" 2>/dev/null
+fi
+
+mkdir -p "$mnt"
+
+# sshfs's exit status was not being read, so a refused host printed "mounted"
+# and exited 0 -- which conn took at face value -- and left behind the empty
+# directory made a line above. An empty mountpoint is indistinguishable from
+# a mount that worked until you look inside it.
+if ! err=$(sshfs "$host:$remote" "$mnt" \
+  -o reconnect \
+  -o ServerAliveInterval=15 \
+  -o ServerAliveCountMax=3 \
+  -o follow_symlinks \
+  -o idmap=user \
+  -o dir_cache=yes 2>&1); then
+  rmdir "$mnt" 2>/dev/null
+  echo "could not mount $host: ${err:-sshfs failed}" >&2
+  exit 1
+fi
+
+# And it can succeed without mounting anything: sshfs forks, and the parent
+# has been known to return before the child has given up.
+if ! mountpoint -q "$mnt"; then
+  rmdir "$mnt" 2>/dev/null
+  echo "could not mount $host: sshfs returned 0 but nothing is mounted" >&2
+  exit 1
+fi
+
+echo "mounted $host:${remote:-~} at $mnt"

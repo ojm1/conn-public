@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Conn
+GenericName=Server panel
+Comment=You have the conn -- the servers you keep coding agents on, and whether they are working or waiting on you
+Exec=conn
+Icon=org.omarchy.conn
+Terminal=false
+DBusActivatable=true
+Categories=Network;RemoteAccess;
+StartupWMClass=org.omarchy.conn
+Keywords=ssh;tmux;servers;agents;claude;

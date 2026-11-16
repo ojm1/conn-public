@@ -1,0 +1,16 @@
+[38;5;114m●[39m [1mBash[0m(npm test)
+  ⎿  41 passed
+
+[38;5;231m●[39m The preview is up: [94m]8;id=ab12cd;https://example.com/preview/\https://example.com/preview/]8;;\[39m
+
+  It is hidden from search engines and nothing links to it yet.
+
+[38;5;246m✻ Cogitated for 2m 4s · done 11:23 AM[39m
+
+※ recap: We're refreshing the example.com homepage, and a checked draft is waiting at the preview link. Once
+  you've looked at it and said go, I'll put it live.
+[39m                                                                              new task? /clear to save 136.4k tokens
+[39m─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ultracode ─
+[39m❯ 
+[39m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on · 1 shell · ↓ to manage

@@ -1,0 +1,63 @@
+# XcodeGen keeps the project as text, which matters here: the desktop half of
+# conn is developed on Linux, where an .xcodeproj cannot be opened, let alone
+# edited. Regenerate with `xcodegen` after changing this file.
+#
+# v1 talks only to conn-agent's HTTPS API on the local network (SPEC §6), so
+# there is no SSH library and no package at all. SwiftTerm comes back with
+# the terminal in M5.
+name: Conn
+options:
+  bundleIdPrefix: com.ojm
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+
+targets:
+  Conn:
+    type: application
+    platform: iOS
+    sources:
+      - path: Conn
+    # XcodeGen writes this plist (gitignored) from the properties below.
+    info:
+      path: Conn/Info.plist
+      properties:
+        CFBundleDisplayName: Conn
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSRequiresIPhoneOS: true
+        ITSAppUsesNonExemptEncryption: false
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UIUserInterfaceStyle: Dark
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        # The agent is on the local network at a bare IP with its own
+        # certificate, which the app pins itself (API/ConnAPI.swift).
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        NSLocalNetworkUsageDescription: >-
+          Conn talks to the Conn agent on your Mac over the local
+          network to show your chats and notes.
+        # conn://pair?url=https://mini.local:8742&code=7K4Q-2M fills in
+        # the pairing screen (from a QR code scanned with the Camera app).
+        CFBundleURLTypes:
+          - CFBundleURLName: com.ojm.conn.pair
+            CFBundleURLSchemes:
+              - conn
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.ojm.conn
+        MARKETING_VERSION: "0.2"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.9"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GENERATE_INFOPLIST_FILE: NO

@@ -1,0 +1,6 @@
+[Unit]
+Description=Conn: note the local tmux sessions, to bring back after a reboot
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/conn --snapshot-sessions
