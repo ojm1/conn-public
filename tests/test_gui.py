@@ -37,6 +37,9 @@ sys.path.insert(0, str(ROOT))
 os.environ.setdefault("CONN_NO_WATCH", "1")
 # Never call the real claude CLI for titles from a test.
 os.environ["CONN_NO_RETITLE"] = "1"
+# The stable channel, whatever terminal this was started from: the checks
+# below are of conn, and test_paths.py covers the dev copy.
+os.environ.pop("CONN_CHANNEL", None)
 
 SESSIONS = ("conntest-alpha", "conntest-beta")
 # Made by the window itself, the way you make one from the + button:
@@ -216,6 +219,15 @@ def run(window, check, gui, hosts, agent_state, Gtk) -> None:
     sent: list = []
     window.notify = lambda host, s, finished=False: sent.append(
         (host, s["name"], s["agent"]["state"]))
+    # And the rest -- "Started X on Y", "Saved to notes" -- go straight to
+    # the application. Broadway does not stop them reaching the real desktop.
+    window.get_application().send_notification = lambda *a, **k: None
+
+    check("the stable window is called conn, with no dev mark",
+          window.get_title() == "conn"
+          and not any(isinstance(w, Gtk.Label) and w.has_css_class("channel")
+                      for w in walk(window)),
+          f"title={window.get_title()!r}")
 
     check("the app tells the desktop what it is called",
           gui.GLib.get_application_name() == "conn",
@@ -653,6 +665,103 @@ def run(window, check, gui, hosts, agent_state, Gtk) -> None:
     check("the footer goes back to the chat count afterwards",
           "chat" in window.footnote.get_text(),
           f"footer={window.footnote.get_text()!r}")
+
+    # -- copying Claude's last reply -----------------------------------------
+    # transcript.last_reply is the ssh; the clipboard is the desktop's. Both
+    # stubbed, so nothing leaves this test and nothing lands on your
+    # clipboard.
+    check("the terminal menu offers Claude's last reply",
+          "Copy Claude's last reply" in copy_labels, f"menu={copy_labels}")
+    import sessionview
+    import transcript
+    from types import SimpleNamespace
+    asked, copied = [], []
+    answer = {"value": ("the reply, exactly", "transcript")}
+
+    def fake_last_reply(host, name, screen=""):
+        asked.append((host, name))
+        return answer["value"]
+
+    real_reply, real_clip = transcript.last_reply, gui.Session.to_clipboard
+    transcript.last_reply = fake_last_reply
+    gui.Session.to_clipboard = staticmethod(lambda text: copied.append(text))
+
+    def settle(predicate, limit=5.0):
+        ctx = gui.GLib.MainContext.default()
+        deadline = time.monotonic() + limit
+        while not predicate() and time.monotonic() < deadline:
+            ctx.iteration(False)
+            time.sleep(0.01)
+
+    try:
+        window.show(session_view)
+        window.footnote.set_text("")
+        handled = window.key_pressed(
+            None, gui.Gdk.KEY_y, 0,
+            gui.Gdk.ModifierType.CONTROL_MASK | gui.Gdk.ModifierType.SHIFT_MASK)
+        settle(lambda: "reply" in window.footnote.get_text())
+        check("ctrl-shift-y copies the open chat's last reply",
+              handled and asked[-1:] == [beta]
+              and copied[-1:] == ["the reply, exactly"],
+              f"asked={asked} copied={copied}")
+        check("and says so in the footer",
+              window.footnote.get_text() == "Copied Claude's last reply",
+              f"footer={window.footnote.get_text()!r}")
+
+        answer["value"] = ("from the screen", "screen")
+        window.footnote.set_text("")
+        session_view.last_reply()
+        settle(lambda: "reply" in window.footnote.get_text())
+        check("the menu's item copies too, and a screen copy says so",
+              copied[-1:] == ["from the screen"]
+              and "from the screen" in window.footnote.get_text(),
+              f"footer={window.footnote.get_text()!r}")
+
+        answer["value"] = ("the turn before", "transcript-busy")
+        window.footnote.set_text("")
+        window.copy_reply(*beta)
+        settle(lambda: "reply" in window.footnote.get_text())
+        check("mid-turn, the copy says it is the previous reply",
+              copied[-1:] == ["the turn before"]
+              and "previous reply" in window.footnote.get_text()
+              and "still working" in window.footnote.get_text(),
+              f"footer={window.footnote.get_text()!r}")
+
+        answer["value"] = ("", "")
+        before = len(copied)
+        window.footnote.set_text("")
+        window.copy_reply(*beta)
+        settle(lambda: "reply" in window.footnote.get_text())
+        check("no reply anywhere leaves the clipboard alone, and says so",
+              len(copied) == before
+              and "No reply" in window.footnote.get_text(),
+              f"footer={window.footnote.get_text()!r}")
+
+        # The header's ⋯ menu, filled as ChatChrome fills it.
+        answer["value"] = ("from the header", "transcript")
+        popover = Gtk.Popover()
+        chrome = SimpleNamespace(win=window, cid="%s/%s" % beta,
+                                 session=session_view)
+        sessionview.ChatChrome._fill_more(chrome, popover)
+        items = [b for b in walk(popover) if isinstance(b, Gtk.Button)
+                 and getattr(b, "label", "") == "Copy Claude's last reply"]
+        hints = [w.get_label() for w in walk(items[0])
+                 if isinstance(w, Gtk.Label)] if items else []
+        check("the chat header's menu offers it, with its key",
+              bool(items) and "ctrl-shift-y" in hints, f"hints={hints}")
+        if items:
+            asked.clear()
+            items[0].emit("clicked")
+            settle(lambda: copied[-1:] == ["from the header"])
+            check("and copies the reply of the chat it heads",
+                  asked == [beta] and copied[-1:] == ["from the header"],
+                  f"asked={asked}")
+
+    finally:
+        transcript.last_reply = real_reply
+        gui.Session.to_clipboard = real_clip
+    window.said = ("", 0.0)
+    window.render()
 
     # -- noticing it has been replaced on disk ------------------------------
     window.check_source()
@@ -1630,6 +1739,84 @@ def chat_list(window, check, gui, hosts, agent_state, Gtk) -> None:
               and id(row_for(window, ("conntest-app", "telegram"))) == before,
               f"before={order} after={chat_order()}")
         check("and is not stamped", not WRITES, f"writes={WRITES}")
+
+        # The dev copy beside a running stable conn: a real change still
+        # moves the row (the stamp is held in memory), but the write is left
+        # to the stable one -- two desktops would stamp every turn twice.
+        # With the stable conn gone it stamps, as the only one there is.
+        tid = "conntest-app/telegram"
+        real_dev, real_up = gui.paths.DEV, window.stable_up
+        real_grace = gui.STABLE_GRACE
+        gui.paths.DEV, window.stable_up = True, True
+        try:
+            WRITES.clear()
+            window.frames.put(("conntest-app", frame(
+                "conntest-app", {"telegram": ASKING, "shell": ""})))
+            window.drain_frames()
+            pump(lambda: WRITES, 0.3)
+            moved = window.chat_index[tid].last_event
+            check("dev with stable running moves the row but writes no stamp",
+                  window.defer_to_stable() and not WRITES
+                  and abs(moved - time.time()) < 10,
+                  f"writes={WRITES} last_event={moved}")
+            # Titles: nothing queued while stable titles (a backlog worked
+            # through when it quits would retitle what it already titled),
+            # a vanished bus name believed only after the grace (its restart
+            # is a blink), and a queue cleared when it comes back.
+            real_due = window.retitler.due
+            window.retitler.due = lambda *_a, **_k: True
+            saved_queue = list(window.retitle_queue)
+            window.retitle_queue.clear()
+            window.frames.put(("conntest-app", frame(
+                "conntest-app", {"telegram": ASKING, "shell": ""})))
+            window.drain_frames()
+            check("dev with stable running queues no titles",
+                  window.retitle_queue == [], str(window.retitle_queue))
+            window._stable_seen(False)
+            blink = window.stable_up and window.stable_grace != 0
+            window._stable_seen(True)
+            check("stable's name gone for a moment (a restart) is not gone",
+                  blink and window.stable_up and window.stable_grace == 0)
+            window.retitle_queue[:] = ["conntest-app/telegram"]
+            window._stable_seen(True)
+            check("stable seen again clears dev's title queue",
+                  window.retitle_queue == [], str(window.retitle_queue))
+            gui.STABLE_GRACE = 1        # the wait itself, not its length
+            window._stable_seen(False)
+            pump(lambda: not window.stable_up, 4)
+            check("gone past the grace, dev takes over",
+                  not window.stable_up and window.stable_grace == 0)
+            window.frames.put(("conntest-app", frame(
+                "conntest-app", {"telegram": ASKING, "shell": ""})))
+            window.drain_frames()
+            check("and queues titles itself",
+                  "conntest-app/telegram" in window.retitle_queue,
+                  str(window.retitle_queue))
+            window.retitler.due = real_due
+            window.retitle_queue[:] = saved_queue
+            window.frames.put(("conntest-app", frame(
+                "conntest-app", {"telegram": BUSY.format(glyph="✶"),
+                                 "shell": ""})))
+            window.drain_frames()
+            pump(lambda: any(w[:3] == ("conntest-app", "telegram",
+                                       "last_event") for w in WRITES))
+            check("and with stable gone, dev stamps it itself",
+                  not window.defer_to_stable()
+                  and any(w[:3] == ("conntest-app", "telegram", "last_event")
+                          for w in WRITES), f"writes={WRITES}")
+        finally:
+            gui.STABLE_GRACE = real_grace
+            if window.stable_grace:
+                gui.GLib.source_remove(window.stable_grace)
+                window.stable_grace = 0
+            if "real_due" in locals():
+                window.retitler.due = real_due
+            gui.paths.DEV, window.stable_up = real_dev, real_up
+            # Back as it was for what follows: the stamps were recorded,
+            # never run, so the option still says two minutes ago.
+            window.stamps.pop(tid, None)
+            WRITES.clear()
+            window.render()
         badge = window.chat_widgets["conntest-app/telegram"]["badge"]
         check("a working chat wears the spinner badge",
               badge.get_visible_child_name() == "working")
@@ -1868,6 +2055,14 @@ def chat_list(window, check, gui, hosts, agent_state, Gtk) -> None:
               page.start.get_sensitive()
               and "csv-export-switches" in page.command_text.get_text())
         page.text.get_buffer().set_text("")
+        menu = Gtk.Popover()
+        page._fill_where(menu)
+        scroller = menu.get_child()
+        check("the Start on list scrolls, never taller than the window",
+              isinstance(scroller, Gtk.ScrolledWindow)
+              and 0 < scroller.get_max_content_height() < max(
+                  window.get_height(), 800),
+              f"child={type(scroller).__name__}")
         window.key_pressed(None, Gdk.KEY_Escape, 0, none)
         page._text_key(None, Gdk.KEY_Escape, 0, none)
         check("Esc leaves it", window.stack.get_visible_child() is not page)
@@ -1880,11 +2075,15 @@ def chat_list(window, check, gui, hosts, agent_state, Gtk) -> None:
         before_main = window.stack.get_visible_child()
         window.key_pressed(None, Gdk.KEY_3, 0, ctrl)
         board = window.notes_pane
-        check("ctrl-3: the notes take the main area, projects the sidebar",
+        check("ctrl-3: the notes take the main area, the tree the sidebar",
               window.stack.get_visible_child() is board
               and window.side_stack.get_visible_child() is board.side
               and not window.project_chip.get_visible()
-              and window.within(board.jot))
+              and window.within(board.editor))
+        check("and the sidebar's button and search are the notes' own",
+              window.new_label.get_text() == "New note"
+              and window.filter.get_placeholder_text() == "Search notes"
+              and window.search_box.get_visible())
         guided = []
         real_guide = window.show_guide
         window.show_guide = lambda: guided.append(1) or True
@@ -1895,29 +2094,59 @@ def chat_list(window, check, gui, hosts, agent_state, Gtk) -> None:
             window.show_guide = real_guide
         check("? in a note is a question mark, not the guide",
               window.typing() and not guided and not took)
-        fake = {"id": "20261105-1031-csv-export", "project": "p", "text": "old",
-                "status": "open", "created": "2026-11-05T10:31:00+11:00"}
+        pid = window.projects[0].id if window.projects else "p"
+        fake = {"id": "20261105-1031-csv-export", "project": pid,
+                "text": "CSV export\nfor the switches", "status": "open",
+                "created": "2026-11-05T10:31:00+11:00"}
+        pump(lambda: not window.notes_fetching, 5)  # ctrl-3's own fetch
         window.note_list = [fake]
-        updates = []
-        real_update = window.update_note
+        updates, created = [], []
+        real_update, real_add = window.update_note, window.add_note
+        # A real fetch landing mid-check would swap note_list back to the
+        # test store's (empty) one, and the open note with it.
+        real_refresh = window.refresh_notes
+        window.refresh_notes = lambda: None
         window.update_note = lambda note, **kw: updates.append((note["id"], kw))
+        window.add_note = lambda project, text, done=None, **kw: \
+            created.append((project, text, done))
         try:
             board.render()
-            board.edit(fake)
-            from gi.repository import Gtk as _G
-            def buttons(w, icon, found):
-                if isinstance(w, _G.Button) and w.get_icon_name() == icon:
-                    found.append(w)
-                c = w.get_first_child()
-                while c is not None:
-                    buttons(c, icon, found)
-                    c = c.get_next_sibling()
-                return found
-            board.editing = None
-            board.render()
-            more = buttons(board.cards, "view-more-symbolic", [])
-            more[0].emit("clicked")
+            def tree_rows():
+                out, i = [], 0
+                while (r := board.side.list.get_row_at_index(i)) is not None:
+                    out.append(r)
+                    i += 1
+                return out
+            notes_rows = [r for r in tree_rows()
+                          if getattr(r, "kind", None) == "note"]
+            check("the tree lists the note under its project, by first line",
+                  any(getattr(r, "kind", None) == "folder" and r.pid == pid
+                      for r in tree_rows())
+                  and [r.key for r in notes_rows] == [fake["id"]])
+            board.open_note(fake["id"])
+            check("opening it puts its text in the editor",
+                  notesview_text(board) == fake["text"]
+                  and board.heading.get_text() == "CSV export")
+            board.editor.get_buffer().set_text("CSV export\nand a total")
+            check("typing marks it edited, not saved yet",
+                  board.dirty and not updates)
+            board.flush()
+            check("and a save sends the new text",
+                  updates == [(fake["id"], {"text": "CSV export\nand a total"})]
+                  and not board.dirty, repr(updates))
+            window.filter.set_text("nothing like this")
+            # The entry waits a beat before it says the search changed.
+            pump(lambda: not any(getattr(r, "kind", None) == "note"
+                                 for r in tree_rows()), 2)
+            check("the search box filters the tree",
+                  not any(getattr(r, "kind", None) == "note"
+                          for r in tree_rows()))
+            window.filter.set_text("")
+            pump(lambda: any(getattr(r, "kind", None) == "note"
+                             for r in tree_rows()), 2)
+            board.more.emit("clicked")
             pump(lambda: False, 0.3)
+            from gi.repository import Gtk as _G
             def popovers(w, found):
                 if isinstance(w, _G.Popover) and w.get_visible():
                     found.append(w)
@@ -1927,32 +2156,45 @@ def chat_list(window, check, gui, hosts, agent_state, Gtk) -> None:
                     c = c.get_next_sibling()
                 return found
             shown = popovers(board, [])
-            check("the card's more button opens its menu", bool(shown),
-                  repr(shown))
-            for p in shown:
-                p.popdown()
+            check("the note's more button opens its menu", bool(shown),
+                  repr((shown, board.current_key, board.draft_pid,
+                        [n.get("id") for n in window.note_list],
+                        board.more.get_visible())))
+            for p_ in shown:
+                p_.popdown()
             pump(lambda: False, 0.1)
-            window.note_list = [fake]    # a fetch may have landed meanwhile
-            board.edit(fake)
-            check("a note opens for editing in place", board.editing == fake["id"])
-            view = None
-            def find(w):
-                nonlocal view
-                if isinstance(w, _G.TextView) and w is not board.jot:
-                    view = w
-                c = w.get_first_child()
-                while c is not None:
-                    find(c)
-                    c = c.get_next_sibling()
-            find(board.cards)
-            view.get_buffer().set_text("new words")
-            board.save_edit(fake, view)
-            check("saving an edit sends the new text",
-                  updates == [(fake["id"], {"text": "new words"})]
-                  and board.editing is None, repr(updates))
+            window.key_pressed(None, Gdk.KEY_n, 0, ctrl)
+            check("ctrl-n in Notes is a new note in the same project",
+                  board.current_key is None and board.draft_pid == pid
+                  and notesview_text(board) == "")
+            board.editor.get_buffer().set_text("a fresh thought")
+            board.flush()
+            check("a draft with words becomes a note in its project",
+                  len(created) == 1 and created[0][:2] == (pid, "a fresh thought"),
+                  repr(created))
+            new = dict(fake, id="20261118-1000-fresh", text="a fresh thought")
+            created[0][2](new, "")
+            check("and carries on as that note",
+                  board.current_key == new["id"] and board.draft_pid is None
+                  and not board.dirty)
         finally:
-            window.update_note = real_update
+            window.update_note, window.add_note = real_update, real_add
+            window.refresh_notes = real_refresh
             window.note_list = []
+            board.current_key, board.draft_pid, board.fresh = None, None, None
+            board.dirty = False
+        window.key_pressed(None, Gdk.KEY_1, 0, ctrl)
+        from gi.repository import Graphene
+        tab_y = []
+        for mode in ("notes", "servers", "chats"):
+            window.set_sidebar_mode(mode)
+            pump(lambda: False, 0.15)
+            got = window.mode_buttons["chats"].compute_point(
+                window, Graphene.Point())
+            tab_y.append(round(got[1].y) if got and got[0] else None)
+        check("the tabs stay put whichever tab is showing",
+              len(set(tab_y)) == 1 and tab_y[0] is not None, repr(tab_y))
+        window.set_sidebar_mode("notes")
         window.key_pressed(None, Gdk.KEY_1, 0, ctrl)
         check("ctrl-1 puts back what was showing",
               window.stack.get_visible_child() is before_main
@@ -1974,8 +2216,10 @@ def chat_list(window, check, gui, hosts, agent_state, Gtk) -> None:
             window.sweep = lambda force=False: swept.append(force)
             window.wake_tick()
             pump(lambda: bool(swept), 4.0)
+            # The window's own wake timer can land during the pump and ask
+            # again (revive_again); one or two asks are both right.
             check("wake: masters checked, streams poked, a forced sweep",
-                  asked == [1] and poke.is_set() and swept == [True]
+                  asked in ([1], [1, 1]) and poke.is_set() and swept == [True]
                   and not window.reviving, repr((asked, swept)))
             asked.clear()
             window.wake_tick()
@@ -3444,7 +3688,7 @@ def servers_tab(window, check, gui, hosts, agent_state, Gtk, fakes) -> None:
               and summary("conntest-app") == "1 chat \u00b7 1 shell"
               and summary("conntest-empty") == "no sessions"
               and summary("conntest-wait") == "",
-              f"dp={summary('conntest-at')!r} app={summary('conntest-app')!r} "
+              f"at={summary('conntest-at')!r} app={summary('conntest-app')!r} "
               f"empty={summary('conntest-empty')!r}")
         dp_sessions = window.rows["conntest-at"]["sessions"]
         extra = dict(window.rows["conntest-app"]["sessions"][1],
@@ -3454,7 +3698,7 @@ def servers_tab(window, check, gui, hosts, agent_state, Gtk, fakes) -> None:
             window.render()
             check("chats and shells both, in one line: 4 chats \u00b7 1 shell",
                   summary("conntest-at") == "4 chats \u00b7 1 shell",
-                  f"dp={summary('conntest-at')!r}")
+                  f"at={summary('conntest-at')!r}")
         finally:
             dp_sessions.remove(extra)
             window.render()
@@ -3825,6 +4069,11 @@ def rebuilds_let_go(window, check, gui, agent_state, Gtk, frame) -> None:
         gui.save_expanded(window.expanded)
         window.set_sidebar_mode("chats")
         window.render()
+
+
+def notesview_text(board):
+    buf = board.editor.get_buffer()
+    return buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False)
 
 
 def rows(window):

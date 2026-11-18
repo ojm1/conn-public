@@ -10,19 +10,23 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import re
 import ssl
+import subprocess
 import sys
 import tempfile
 import threading
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import agent_api as API  # noqa: E402
 import agent_state as A  # noqa: E402
 import chats as C  # noqa: E402
+import connlog  # noqa: E402
 import notes as N  # noqa: E402
 import starting  # noqa: E402
 from test_agent_state import CLAUDE, RULE  # noqa: E402
@@ -73,6 +77,12 @@ class FakeActions(API.Actions):
 
     def task(self, host, path):
         return "fix the export" if path else ""
+
+    def transcript(self, host, session, timeout=None):
+        # Inherited, this would ssh to "web". "" is the screen's turn, which
+        # is what test_api's latest_reply checks.
+        self.calls.append(("transcript", host, session))
+        return ""
 
 
 def rows_for(screen_b: str, state_b: str, up: bool = True) -> dict:
@@ -477,6 +487,89 @@ def test_https(tmp: Path) -> None:
         server.shutdown()
 
 
+def test_transcript_reply(tmp: Path) -> None:
+    """The real Actions.transcript, with only the ssh under it stubbed."""
+    import transcript as TR
+    store = N.Store(tmp / "notes-tr")
+    actions = FakeActions(store)
+    actions.transcript = API.Actions.transcript.__get__(actions)
+    watch = API.Watch()
+    devices = API.Devices(tmp / "d-tr.json", tmp / "c-tr.json")
+    api = API.Api(watch, devices, actions)
+    phone, _ = devices.create("iPhone")
+    feed(watch, rows_for(CLAUDE["boxed prompt"], A.NEEDS_YOU), projects(tmp))
+    fixture = (ROOT / "tests" / "fixtures" / "transcript_turn.jsonl").read_text()
+    sid = "0b6f7c1e-2a3d-4e5f-8a9b-0c1d2e3f4a5b"
+    ran = []
+    timeouts = []
+    answer = {"found": True}
+
+    def fake_run(argv, input=b"", **kw):
+        ran.append((argv, input))
+        timeouts.append(kw.get("timeout"))
+        token = re.search(rb"m='###([0-9a-f]+):'", input).group(1).decode()
+        if answer["found"]:
+            out = (f"###{token}:SESSION {sid}\n###{token}:STATUS idle\n"
+                   f"###{token}:MOVED \n###{token}:SIZE 1\n###{token}:TAIL\n"
+                   + fixture)
+        else:
+            out = f"###{token}:NONE no transcript\n"
+        return subprocess.CompletedProcess(argv, 0, out.encode(), b"")
+
+    real = TR.subprocess.run
+    TR.subprocess.run = fake_run
+    try:
+        status, detail = api.call("GET", "/chats/web/export", {}, None, phone)
+        check("transcript: chat detail's latest_reply is the transcript's text",
+              status == 200 and detail["latest_reply"].startswith(
+                  "Fixed the CSV export.")
+              and detail["latest_reply"].endswith("All 41 tests pass.")
+              and "\n- dates use ISO format\n" in detail["latest_reply"],
+              repr(detail.get("latest_reply", ""))[:200])
+        check("transcript: fetched over ssh from the chat's own server",
+              len(ran) == 1 and "ssh" in ran[0][0] and "web" in ran[0][0]
+              and b"=$s:" in ran[0][1] and b"s=export" in ran[0][1],
+              repr(ran[:1])[:200])
+        check("transcript: a short ssh, so task + transcript fit the "
+              "phone's 20s", timeouts[:1] and timeouts[0] is not None
+              and timeouts[0] <= API.TRANSCRIPT_TIMEOUT
+              and API.DETAIL_BUDGET < 20, str(timeouts))
+        check("transcript: the API shape is unchanged",
+              set(detail) >= {"task", "latest_reply", "recap", "started",
+                              "windows"})
+        api.call("GET", "/chats/web/export", {}, None, phone)
+        check("transcript: opened again with nothing changed, no second ssh",
+              len(ran) == 1, str(len(ran)))
+        answer["found"] = False
+        with watch.lock:
+            watch.replies.clear()
+        status, detail = api.call("GET", "/chats/web/export", {}, None, phone)
+        check("transcript: none to read -> the screen's reply, as before",
+              len(ran) == 2 and "ISO format" in detail["latest_reply"]
+              and "All 41 tests pass." in detail["latest_reply"])
+        # The task's ssh took the whole budget: the screen, at once, and
+        # nothing kept, so the next open asks the transcript.
+        with watch.lock:
+            watch.replies.clear()
+        answer["found"] = True
+        chat = api._chat("web", "export")
+        with watch.lock:
+            screen = (watch.sessions.get("web/export") or {}).get("screen", "")
+        text = api._reply(chat, "web", "export", screen, left=0.2)
+        with watch.lock:
+            kept = "web/export" in watch.replies
+        check("transcript: no time left after the task -> the screen, no ssh",
+              len(ran) == 2 and text and not kept, f"{len(ran)} {kept}")
+        log = (tmp / "log").read_text() if (tmp / "log").exists() else ""
+        connlog.flush(force=True)
+        log = (tmp / "log").read_text() if (tmp / "log").exists() else log
+        check("transcript: the log says where the reply came from, never "
+              "what it said", "Fixed the CSV" not in log
+              and "ISO format" not in log)
+    finally:
+        TR.subprocess.run = real
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
@@ -484,6 +577,7 @@ def main() -> int:
         test_screen_reading()
         test_devices(tmp)
         test_api(tmp)
+        test_transcript_reply(tmp)
         test_finished(tmp)
         test_flicker_and_overlays(tmp)
         test_live_prompt_only()

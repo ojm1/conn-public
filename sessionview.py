@@ -226,7 +226,9 @@ class ChatChrome:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
         chat = self.win.chat_index.get(self.cid)
         host, name = self.session.host, self.session.name
-        entries = [("Save recap to notes", "",
+        entries = [("Copy Claude's last reply", "ctrl-shift-y",
+                    lambda: self.win.copy_reply(host, name)),
+                   ("Save recap to notes", "",
                     lambda: self.win.save_recap(self.cid))]
         if chat is not None:
             entries += [("Unstar" if chat.starred else "Star", "",

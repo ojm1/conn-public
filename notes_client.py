@@ -15,6 +15,7 @@ something on a train.
 from __future__ import annotations
 
 import base64
+import fcntl
 import json
 import os
 import secrets
@@ -165,7 +166,26 @@ class NotesClient:
         An item the store refuses is moved to outbox/rejected/ rather than
         blocking every later call."""
         with FLUSH_LOCK:
-            return self._flush()
+            # And one across processes: the stable conn and the dev copy
+            # share this outbox (it is config, not state), and both flush
+            # when the notes host comes back. Not waited for -- the other
+            # one is sending these very files, and what it leaves is sent
+            # next time.
+            if not self.outbox.is_dir():
+                return 0
+            try:
+                fd = os.open(self.outbox / ".flush.lock",
+                             os.O_RDWR | os.O_CREAT, 0o600)
+            except OSError:
+                return self._flush()
+            try:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    return 0
+                return self._flush()
+            finally:
+                os.close(fd)        # closing drops the lock
 
     def _flush(self) -> int:
         files = sorted(self.outbox.glob("*.json")) if self.outbox.is_dir() \

@@ -1,0 +1,13 @@
+#!/bin/bash
+# Conn, the dev copy -- runs beside the stable conn, not instead of it.
+# CONN_CHANNEL=dev is the one switch (paths.py): its own app id, so this is
+# a second window rather than a hand-over to the running conn; its own
+# state in ~/.local/state/conn-dev and its own log; no desktop notifications
+# unless CONN_DEV_NOTIFY=1, because the stable conn is already sending them.
+# Install (from the checkout; never touches the stable copy):
+#   mkdir -p ~/.local/share/conn-dev/app && cp *.py ~/.local/share/conn-dev/app/ && install -m755 bin/conn-dev ~/.local/bin/ && cp org.omarchy.conn.dev.desktop ~/.local/share/applications/
+# (the .desktop puts "Conn dev" in the launcher and names its window in the bar)
+[ -t 1 ] && printf '\033]0;conn dev\007'
+export CONN_CHANNEL=dev
+APP="$HOME/.local/share/conn-dev"
+exec python3 "$APP/app/main.py" "$@"

@@ -7,7 +7,7 @@ the defaults the screen would have picked.
 
 What is chosen where, so the two never disagree:
 - project: the filter's project, else the focused chat's, else the last one
-  used (remembered in ~/.local/state/conn/newchat.json);
+  used (remembered in newchat.json in conn's state folder);
 - server: the filter's server if it belongs to the project, else the
   project's first server that answers, else its first;
 - folder: the project's folder for that server (projects.toml);
@@ -25,9 +25,10 @@ from gi.repository import Gdk, GLib, Gtk, Pango
 
 import agent_state
 import chats
+import paths
 import starting
 
-PREFS = Path.home() / ".local" / "state" / "conn" / "newchat.json"
+PREFS = paths.STATE / "newchat.json"
 
 
 def load_prefs(path: Path = PREFS) -> dict:
@@ -462,6 +463,16 @@ class NewChatPage(Gtk.Box):
     def _fill_where(self, popover: Gtk.Popover) -> None:
         box = self.win._menu_box(popover, "Start on")
         box.set_size_request(380, -1)
+        # Every project's servers make a list taller than the window; scroll
+        # it instead of letting it run off the bottom of the screen.
+        popover.set_child(None)
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroller.set_propagate_natural_height(True)
+        scroller.set_max_content_height(
+            max(240, (self.win.get_height() or 800) - 260))
+        scroller.set_child(box)
+        popover.set_child(scroller)
         for project in self.win.projects:
             if not project.servers:
                 continue

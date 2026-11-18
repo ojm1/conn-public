@@ -43,19 +43,29 @@ import notes as notes_store  # noqa: E402
 import notes_client  # noqa: E402
 import notesview  # noqa: E402
 import palette as cmdk  # noqa: E402
+import paths  # noqa: E402
 import retitle  # noqa: E402
 import sessionview  # noqa: E402
 import starting  # noqa: E402
+import transcript  # noqa: E402
 from theming import legible, load_palette, mix, terminal_font  # noqa: E402
 
-APP_ID = "org.omarchy.conn"
+# org.omarchy.conn, or org.omarchy.conn.dev for the copy run beside it
+# (CONN_CHANNEL=dev, see paths.py): its own GApplication, so starting it
+# never hands over to the stable window, and its own Wayland app_id, so
+# Hyprland's launch-or-focus for conn never grabs it.
+APP_ID = paths.APP_ID
+# The icon is the stable one's in both: only org.omarchy.conn has one
+# installed, and a dev toast with a blank circle helps nobody.
+ICON = paths.STABLE_ID
 
 # What the desktop calls this process. Without it every notification is
 # announced as "python3", with a letter in a circle where the icon should be:
 # the name comes from here, not from the application id. Set on import
 # because it belongs to the process rather than to one class -- anything that
-# imports this module is conn, including the tests.
-GLib.set_application_name("conn")
+# imports this module is conn, including the tests. "conn dev" for the dev
+# copy, so a toast it was asked to send says which one sent it.
+GLib.set_application_name(paths.TITLE)
 GLib.set_prgname(APP_ID)
 HOME_PAGE = "https://github.com/ojm1/conn-public"
 SOURCE = "https://github.com/ojm1/conn-public"
@@ -123,6 +133,10 @@ WATCH_STALL = 45.0
 # spent suspended counts as having slept (see wake_tick).
 WAKE_CHECK_SECONDS = 5
 WAKE_GAP = 10.0
+# How long the dev copy waits, after the stable conn's bus name goes, before
+# taking over the stamps and titles: a restart-to-update drops the name for a
+# moment and takes it back (see _stable_seen).
+STABLE_GRACE = 15
 # A probe slower than this goes in the connection-event log even when the
 # host's state did not change (see connlog).
 SLOW_PROBE = 10.0
@@ -133,7 +147,7 @@ DRAFT_DWELL = 120.0
 # Zoom, the way every terminal does it: a multiplier on the font the config
 # asked for, kept between runs because a size you had to set twice is not a
 # setting.
-ZOOM_STATE = Path.home() / ".local" / "state" / "conn" / "zoom"
+ZOOM_STATE = paths.STATE / "zoom"
 
 # Which servers are watched live (shown as "Watch live" in the Site Manager;
 # the file and the in-code name are from when it was a star on the host).
@@ -142,21 +156,21 @@ ZOOM_STATE = Path.home() / ".local" / "state" / "conn" / "zoom"
 # break ssh, scp, rsync and every git remote using that alias. Not to be
 # confused with a starred *chat*, which is @conn_starred on the tmux session
 # itself so every client sees it (SPEC §2).
-STARS_STATE = Path.home() / ".local" / "state" / "conn" / "starred"
+STARS_STATE = paths.STATE / "starred"
 
 # The order you last arranged the servers in, by hand. Beside the config for
 # the same reason the stars are: order has no representation in ssh config
 # either, and rewriting Host blocks to fake one is how a comment or a shared
 # alias gets eaten. Advisory -- a host it does not name still shows, after the
 # ones it does, and a name for a host that is gone is ignored.
-ORDER_STATE = Path.home() / ".local" / "state" / "conn" / "order"
+ORDER_STATE = paths.STATE / "order"
 
 # Which servers are opened out in the Servers tab, their sessions showing.
 # None by default: the tab is a list of servers first, and a dozen servers
 # each followed by every tmux session on it read as fifty servers. Kept
 # between runs, as the order is, because a server you keep open is one you
 # go to.
-EXPANDED_STATE = Path.home() / ".local" / "state" / "conn" / "expanded"
+EXPANDED_STATE = paths.STATE / "expanded"
 
 # A watched host is live: a watch stream and the 45s sweep. The rest are
 # probed on a long timer and never streamed, which is what stops a list of
@@ -257,7 +271,7 @@ def notification(host: str, session: dict, chat=None,
                       + (f" -- {detail}" if detail else ""))
     # Our own icon rather than whatever the shell picks for an unknown sender.
     # Themed, so it follows the icon installed under the app id.
-    note.set_icon(Gio.ThemedIcon.new(APP_ID))
+    note.set_icon(Gio.ThemedIcon.new(ICON))
     # A blocked session is the one thing here worth interrupting for;
     # everything else this window has to say, it says in the sidebar.
     note.set_priority(Gio.NotificationPriority.HIGH
@@ -687,7 +701,8 @@ class Session(Gtk.Box):
     clipboard_serial = 0
 
     def __init__(self, host: str, name: str, palette, on_exit, screen=None,
-                 font: str = "", zoom: float = 1.0, notice=None):
+                 font: str = "", zoom: float = 1.0, notice=None,
+                 last_reply=None):
         super().__init__(orientation=Gtk.Orientation.VERTICAL)
         self.host = host
         self.name = name
@@ -701,6 +716,10 @@ class Session(Gtk.Box):
         # normally. A copy with no report is indistinguishable from a copy
         # that did not happen.
         self.notice = notice or (lambda text: None)
+        # Copies Claude's last reply, from its transcript (Conn.copy_reply).
+        # The window's, because the lookup is an ssh and the window is what
+        # runs those off the main loop; None leaves it off the menu.
+        self.last_reply = last_reply
         # Whether the window has seen this session's server go dark and not
         # yet come back (Conn.paint_banners), and whether the attach died
         # with its connection: a dead view keeps its scrollback and waits to
@@ -912,6 +931,8 @@ class Session(Gtk.Box):
         else:
             item("Copy -- hold shift to select", self.copy, False)
         item("Copy the whole screen", self.copy_screen)
+        if self.last_reply is not None:
+            item("Copy Claude's last reply", self.last_reply)
         item("Paste", self.paste)
         item("Select all", self.term.select_all)
         popover.set_child(box)
@@ -1070,7 +1091,7 @@ class OfflinePage(Gtk.Box):
 
 class Conn(Gtk.ApplicationWindow):
     def __init__(self, app):
-        super().__init__(application=app, title="conn")
+        super().__init__(application=app, title=paths.TITLE)
         self.set_default_size(1400, 860)
 
         self.palette = load_palette()
@@ -1166,6 +1187,23 @@ class Conn(Gtk.ApplicationWindow):
         self.just_finished: set[str] = set()
         self.projects_window: Gtk.Window | None = None
         self.writer = OptionWriter(self._option_failed)
+        # The dev copy beside the stable one: both watch the same sessions,
+        # and both would write the @conn_* options the window writes on its
+        # own -- a last_event stamp per turn, a Haiku title per finish. Those
+        # are left to the stable conn while it is running (defer_to_stable);
+        # what you do in a window (star, rename, project, a reply sent) is
+        # written by the window you did it in, as ever. Watched, not polled:
+        # the bus says when the stable name comes and goes. Until it has
+        # said, assume it is there -- a stamp missed for a second is
+        # nothing, a title asked for twice is a Haiku call.
+        self.stable_up = paths.DEV
+        self.stable_grace = 0       # the wait before believing it gone
+        if paths.DEV:
+            self.stable_watch = Gio.bus_watch_name(
+                Gio.BusType.SESSION, paths.STABLE_ID,
+                Gio.BusNameWatcherFlags.NONE,
+                lambda *_: self._stable_seen(True),
+                lambda *_: self._stable_seen(False))
         # The fold in the chat list: the chats past this week. Servers used
         # to be a second fold under the chats; it is its own tab now (ctrl-2,
         # see listed()), which is where everything the old host-grouped list
@@ -1361,8 +1399,11 @@ class Conn(Gtk.ApplicationWindow):
 
         inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         inner.add_css_class("side")      # its border inside the fixed width
+        # Name, then the tabs, then the tab's own New / search / chips: the
+        # tabs first so they never move when the rows under them change.
         inner.append(self._wordmark())
         inner.append(self._mode_tabs())
+        inner.append(self.side_actions)
         # Chats, Servers or Notes (ctrl-1 / ctrl-2 / ctrl-3): the same
         # column, a different list under it. Chats and Servers are both
         # self.list -- the page named "chats" -- refilled by render().
@@ -1489,6 +1530,7 @@ class Conn(Gtk.ApplicationWindow):
             ("F12", "back to the list; arrows move, enter opens"),
             ("ctrl-shift-c / v", "copy / paste -- shift-drag to select first"),
             ("ctrl-shift-s", "copy the whole screen, no selecting needed"),
+            ("ctrl-shift-y", "copy Claude's last reply, word for word"),
             ("ctrl-shift-a", "select everything on the screen"),
             ("ctrl-shift-w", "close the view, leave the session running"),
             ("ctrl-shift-k", "kill the selected session, for good"),
@@ -1511,7 +1553,8 @@ class Conn(Gtk.ApplicationWindow):
             ("right-click a server",
              "watch it live or move it, its projects, check again, new "
              "session, files, passwords, edit, forget"),
-            ("right-click the screen", "copy, paste, and every link on it"),
+            ("right-click the screen", "copy, paste, Claude's last reply, and "
+             "every link on it"),
             ("hover a session", "a bin over the time kills it"),
             ("star on a chat", "pins it under Starred, on every client"),
             ("chips", "Project, Server, Needs you, group by project -- "
@@ -3262,6 +3305,17 @@ class Conn(Gtk.ApplicationWindow):
                         servers[0])
         return self.selected_host()
 
+    def new_for_tab(self) -> bool:
+        """The sidebar's New button and ctrl-n: whatever is new on the
+        tab showing -- a chat, a server, a note."""
+        if self.sidebar_mode == "servers":
+            self.prompt_add_host()
+            return True
+        if self.sidebar_mode == "notes":
+            self.notes_pane.new_note()
+            return True
+        return self.new_chat()
+
     def new_chat(self, project: str | None = None,
                  host: str | None = None) -> bool:
         """ctrl-n and the New chat button: the New chat screen (phase 2),
@@ -3284,7 +3338,7 @@ class Conn(Gtk.ApplicationWindow):
             self._back_to_offline_page()
         elif back is self.notes_pane and self.sidebar_mode == "notes":
             self.stack.set_visible_child(self.notes_pane)
-            self.notes_pane.jot.grab_focus()
+            self.notes_pane.focus()
         else:
             self.stack.set_visible_child(self.placeholder)
             self.focus_list()
@@ -3624,9 +3678,17 @@ class Conn(Gtk.ApplicationWindow):
         self.server_chip.set_visible(mode == "chats")
         self.needs_chip.set_visible(mode == "chats")
         self.group_chip.set_visible(mode == "chats")
-        self.search_box.set_visible(mode in ("chats", "servers"))
+        self.chips_row.set_visible(mode == "chats")
         self.filter.set_placeholder_text(
-            "Search servers" if mode == "servers" else "Search chats")
+            {"servers": "Search servers", "notes": "Search notes"}.get(
+                mode, "Search chats"))
+        self.new_label.set_text(
+            {"servers": "New server", "notes": "New note"}.get(
+                mode, "New chat"))
+        # A chat search is not a note search: entering or leaving Notes
+        # starts the box empty rather than filtering by the other's words.
+        if (mode == "notes") != (before == "notes") and self.filter.get_text():
+            self.filter.set_text("")
         if mode != "notes" and before != mode:
             # The same list, other rows: rebuilt now rather than on the next
             # tick, so the tab and what is under it change together.
@@ -3645,8 +3707,9 @@ class Conn(Gtk.ApplicationWindow):
             self.stack.set_visible_child(self.notes_pane)
             self.notes_pane.render()
             self.refresh_notes()
-            self.notes_pane.jot.grab_focus()
+            self.notes_pane.focus()
         elif current is self.notes_pane:
+            self.notes_pane.flush()
             back, self.before_notes = self.before_notes, None
             if isinstance(back, Session) and back in self.open.values():
                 self.show(back)
@@ -3657,16 +3720,19 @@ class Conn(Gtk.ApplicationWindow):
                 self.focus_list()
         return True
 
-    def popup_at(self, widget: Gtk.Widget, x: float, y: float, items):
-        """popup() for a note card: parented to the Notes pane, which
-        outlives the cards a refetch replaces, at the click's point."""
+    def popup_at(self, widget: Gtk.Widget, x: float, y: float, items,
+                 parent: Gtk.Widget | None = None):
+        """popup() for a note: parented to the Notes pane (or the notes
+        tree), which outlives the rows a refetch replaces, at the click's
+        point."""
+        parent = parent or self.notes_pane
         # PyGObject gives (ok, x, y) on older GTK and (x, y) or None on newer
         # ones; the three-way unpack threw, so the menu never opened.
-        got = widget.translate_coordinates(self.notes_pane, x, y)
+        got = widget.translate_coordinates(parent, x, y)
         if got and len(got) == 3:
             got = got[1:] if got[0] else None
         px, py = got or (0, 0)
-        return self.popup(None, px, py, items, parent=self.notes_pane)
+        return self.popup(None, px, py, items, parent=parent)
 
     # -- the ctrl-k palette ----------------------------------------------
 
@@ -3762,9 +3828,42 @@ class Conn(Gtk.ApplicationWindow):
         elif item.run is not None:
             item.run()
 
+    def defer_to_stable(self) -> bool:
+        """Whether this is the dev copy with the stable conn running, which
+        then does the writing nobody asked for (see stable_up)."""
+        return paths.DEV and self.stable_up
+
+    def _stable_seen(self, up: bool) -> None:
+        """The bus says the stable conn's name came or went. A going is
+        believed only after STABLE_GRACE: the stable conn's restart (to
+        update) is an exec, which drops its bus connection and takes it up
+        again a second later, and is not the stable conn gone."""
+        if self.stable_grace:
+            GLib.source_remove(self.stable_grace)
+            self.stable_grace = 0
+        if up:
+            self._stable_set(True)
+        elif self.stable_up:
+            def gone():
+                self.stable_grace = 0
+                self._stable_set(False)
+                return GLib.SOURCE_REMOVE
+            self.stable_grace = GLib.timeout_add_seconds(STABLE_GRACE, gone)
+
+    def _stable_set(self, up: bool) -> None:
+        if up != self.stable_up:
+            connlog.event("dev: stable conn "
+                          + ("running, leaving stamps and titles to it" if up
+                             else "not running, stamping and titling here"))
+        self.stable_up = up
+        if up:
+            # Anything queued before it came is its to title now.
+            self.retitle_queue.clear()
+
     def _retitle_next(self) -> None:
         """Title the next queued chat on a worker; one call at a time."""
-        if self.retitler.busy or os.environ.get("CONN_NO_RETITLE"):
+        if self.retitler.busy or os.environ.get("CONN_NO_RETITLE") \
+                or self.defer_to_stable():
             return
         while self.retitle_queue:
             cid = self.retitle_queue.pop(0)
@@ -3939,7 +4038,11 @@ class Conn(Gtk.ApplicationWindow):
 
     def open_first(self) -> None:
         """Enter in the search box: open the first chat it found -- in the
-        Servers tab, the first server or session it found."""
+        Servers tab, the first server or session it found; in Notes, the
+        first note."""
+        if self.sidebar_mode == "notes":
+            self.notes_pane.side.open_first()
+            return
         if not self.query():
             row = self.list.get_selected_row()
             if row is not None and (getattr(row, "key", None)
@@ -4434,9 +4537,7 @@ class Conn(Gtk.ApplicationWindow):
             # chat list. F12 then ctrl-k/ctrl-n reaches them from there.
             in_terminal = isinstance(self.get_focus(), Vte.Terminal)
             if name == "f":
-                # The Servers tab searches its own rows; Notes has no box.
-                if self.sidebar_mode not in ("chats", "servers"):
-                    self.set_sidebar_mode("chats")
+                # Each tab searches its own rows.
                 self.filter.grab_focus()
                 self.filter.select_region(0, -1)
                 return True
@@ -4445,7 +4546,7 @@ class Conn(Gtk.ApplicationWindow):
             if name == "k" and not in_terminal:
                 return self.open_palette()
             if name == "n" and not in_terminal:
-                return self.new_chat()
+                return self.new_for_tab()
             # ctrl-1 / ctrl-2 / ctrl-3: Chats, Servers and Notes, the tabs'
             # order. Nothing in
             # a shell or in Claude reads ctrl-digit, so these are conn's
@@ -4488,6 +4589,8 @@ class Conn(Gtk.ApplicationWindow):
                 return self.rename_selected()
             if name == "s":
                 return self.copy_screen()
+            if name == "y":
+                return self.copy_reply()
             if name == "up":
                 return self.move_selected(-1)
             if name == "down":
@@ -4615,6 +4718,58 @@ class Conn(Gtk.ApplicationWindow):
         current = self.stack.get_visible_child()
         if isinstance(current, Session):
             current.copy_screen()
+        return True
+
+    def copy_reply(self, host: str | None = None,
+                   name: str | None = None) -> bool:
+        """ctrl-shift-y, the terminal menu and the header's ⋯: Claude's last
+        reply on the clipboard, word for word.
+
+        From the transcript Claude Code writes (transcript.py), because the
+        screen has it wrapped at the terminal's width and cut where it
+        scrolled away; the screen's reading of it only when there is no
+        transcript to read -- an older Claude, a server that will not say --
+        and the notice says which, since that copy may be clipped.
+
+        The lookup is an ssh round trip, so it runs on a thread and lands
+        back here; a second press while one is out is the same copy, not
+        another ssh. The log gets where it came from, never the text."""
+        if host is None or name is None:
+            current = self.stack.get_visible_child()
+            if not isinstance(current, Session):
+                return False        # no chat open: the key is not ours
+            host, name = current.host, current.name
+        key = (host, name)
+        pending = self.__dict__.setdefault("replies_pending", set())
+        if key in pending:
+            return True
+        pending.add(key)
+        screen = self.screen_of(host, name)
+
+        def work():
+            try:
+                text, source = transcript.last_reply(host, name, screen)
+            except Exception:  # noqa: BLE001 -- landed must run
+                text, source = "", ""
+            GLib.idle_add(landed, text, source)
+
+        def landed(text, source):
+            pending.discard(key)
+            if text:
+                Session.to_clipboard(text)
+            connlog.event(f"copy reply {host}/{name}: "
+                          + (f"from the {source}" if text else "none found"))
+            # Mid-turn, the transcript's last finished answer is the turn
+            # before's: copied, but not passed off as the one in progress.
+            self.notice("Copied Claude's last reply" if source == "transcript"
+                        else "Copied Claude's previous reply -- it is still "
+                        "working" if source == "transcript-busy"
+                        else "Copied Claude's last reply, from the screen -- "
+                        "it may be cut short" if text
+                        else "No reply from Claude to copy yet")
+            return GLib.SOURCE_REMOVE
+
+        threading.Thread(target=work, name="copy-reply", daemon=True).start()
         return True
 
     def notice(self, text: str) -> None:
@@ -4750,7 +4905,7 @@ class Conn(Gtk.ApplicationWindow):
         count, and the same words are on the bar's tooltip.
         """
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10,
-                      margin_top=14, margin_bottom=8,
+                      margin_top=14, margin_bottom=10,
                       margin_start=12, margin_end=12)
 
         top = Gtk.Box(spacing=10)
@@ -4770,6 +4925,16 @@ class Conn(Gtk.ApplicationWindow):
         mark = Gtk.Label(label=WORDMARK, xalign=0)
         mark.add_css_class("wordmark")
         top.append(mark)
+        # The dev copy says so, in the one place the eye lands first: two
+        # windows that look the same are two windows you type into by
+        # mistake.
+        if paths.DEV:
+            channel = Gtk.Label(label="dev", valign=Gtk.Align.CENTER)
+            channel.add_css_class("channel")
+            channel.set_tooltip_text(
+                "The dev copy (CONN_CHANNEL=dev), running beside the stable "
+                "conn with state of its own")
+            top.append(channel)
 
         spacer = Gtk.Box()
         spacer.set_hexpand(True)
@@ -4790,6 +4955,14 @@ class Conn(Gtk.ApplicationWindow):
         top.append(fleet)
         box.append(top)
 
+        # Everything under the tabs: the tab's own New button, its search
+        # box and (Chats only) the chips. Built here, placed by _build()
+        # below the tabs, so the tabs sit in the same place on every tab.
+        actions = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10,
+                          margin_top=10, margin_bottom=8,
+                          margin_start=12, margin_end=12)
+        self.side_actions = actions
+
         # The one primary button. Its label follows the filter -- "New chat
         # in Acme", "New chat on acme-app" -- so it says where the chat will
         # go before you press it. In phase 1 it opens the new-session prompt
@@ -4809,8 +4982,8 @@ class Conn(Gtk.ApplicationWindow):
         self.new_button.set_tooltip_text(
             "Start a session on the server the filter picks -- or the "
             "selected one (ctrl-n)")
-        self.new_button.connect("clicked", lambda _b: self.new_chat())
-        box.append(self.new_button)
+        self.new_button.connect("clicked", lambda _b: self.new_for_tab())
+        actions.append(self.new_button)
 
         # ctrl-k on the field's right edge, as the design keys it. Hidden
         # while there is text: the entry's clear icon takes that spot.
@@ -4825,7 +4998,7 @@ class Conn(Gtk.ApplicationWindow):
         search.add_overlay(self.search_hint)
         self.filter.connect("changed", lambda e: self.search_hint.set_visible(
             not e.get_text()))
-        box.append(search)
+        actions.append(search)
         self.search_box = search
 
         chips = Gtk.Box(spacing=6)
@@ -4862,7 +5035,8 @@ class Conn(Gtk.ApplicationWindow):
             "order, instead of newest first")
         self.group_chip.connect("toggled", self._group_toggled)
         chips.append(self.group_chip)
-        box.append(chips)
+        actions.append(chips)
+        self.chips_row = chips
         return box
 
     def _chip_menu(self, fill) -> Gtk.MenuButton:
@@ -5233,6 +5407,12 @@ class Conn(Gtk.ApplicationWindow):
         .wordmark {{ color: {p.foreground}; font-family: {MONO};
                      font-weight: bold; font-size: 1.35em;
                      letter-spacing: 0.04em; }}
+        .channel {{ color: {amber_tint_text};
+                    background: alpha({p.yellow}, {CHIP_TINT});
+                    border: 1px solid alpha({p.yellow}, 0.5);
+                    font-family: {MONO}; font-weight: bold;
+                    font-size: 0.75em; border-radius: 6px;
+                    padding: 1px 6px; }}
         .condition {{ border-radius: 2px; }}
         .fleet-green {{ background: {p.green}; }}
         .fleet-red {{ background: {p.red}; }}
@@ -5654,8 +5834,27 @@ class Conn(Gtk.ApplicationWindow):
                                 background: transparent; box-shadow: none;
                                 min-height: 28px; font-size: 0.88em;
                                 color: {p.foreground}; }}
-        .notes-project-name {{ color: {p.foreground}; }}
-        .notes-projects row:selected .mode-count {{ color: inherit; }}
+        .notes-project-name {{ color: {p.foreground}; font-weight: 600; }}
+        .notes-tree row:selected .mode-count {{ color: inherit; }}
+        .notes-tree row {{ border-radius: 6px; margin: 0 6px; }}
+        .notes-note .note-row-title {{ color: {p.foreground};
+                                       font-size: 0.92em; }}
+        .notes-note.note-done .note-row-title {{ color: {dim_title}; }}
+        .tree-chevron, .tree-icon {{ color: {row_muted}; }}
+        .tree-add {{ min-height: 20px; min-width: 20px; padding: 0;
+                     color: {row_muted}; opacity: 0.6; }}
+        .tree-add:hover {{ opacity: 1; color: {p.foreground}; }}
+        .note-head {{ padding: 12px 18px; background: {p.panel};
+                      border-bottom: 1px solid {p.surface}; }}
+        .note-crumb {{ color: {p.muted}; }}
+        .note-title {{ color: {p.foreground}; font-weight: 700; }}
+        .note-editor, .note-editor text {{ background: {p.background};
+                                           color: {p.foreground}; }}
+        .note-editor {{ font-family: {MONO}; }}
+        .note-statusbar {{ background: {p.panel};
+                           border-top: 1px solid {p.surface};
+                           padding: 4px 14px; color: {row_muted};
+                           font-family: {MONO}; font-size: 0.78em; }}
         """
         self.style_css = css    # kept for the tests' contrast checks
         provider = Gtk.CssProvider()
@@ -6112,7 +6311,13 @@ class Conn(Gtk.ApplicationWindow):
                 continue
             chat.last_event, chat.stamped = stamp, True
             self.stamps[chat.id] = stamp
-            self.writer.put(chat.host, chat.session, "last_event", str(stamp))
+            # Held in memory either way, so the row moves now; written only
+            # by one desktop conn. Two writers could not loop -- each stamps
+            # only what it saw change, never the other's stamp -- but every
+            # turn would be two ssh writes, the older landing last.
+            if not self.defer_to_stable():
+                self.writer.put(chat.host, chat.session, "last_event",
+                                str(stamp))
 
         # Finished, not seen (decision D). After the stamps, so a finish has
         # its new last_event to compare with the seen book. The chat you are
@@ -6127,7 +6332,12 @@ class Conn(Gtk.ApplicationWindow):
                 chats.save_seen(self.seen, chats.SEEN_STATE)
         chats.mark_finished(built, self.finish, self.seen)
         self.just_finished |= finished
-        for chat in live:
+        # Nothing queued while the stable conn is the one titling: it titles
+        # these itself, and a backlog worked through once it quits would
+        # overwrite its titles with fresh, different ones -- the flip the
+        # deferral is for. Chats with no title of ours stay due (retitle's
+        # first-sight rule), so they are still asked for once it is gone.
+        for chat in live if not self.defer_to_stable() else ():
             if chat.id not in self.retitle_queue and \
                     self.retitler.due(chat, chat.id in finished, now):
                 self.retitle_queue.append(chat.id)
@@ -6852,6 +7062,9 @@ class Conn(Gtk.ApplicationWindow):
         return needle in key[0].lower() or needle in key[1].lower()
 
     def refilter(self) -> None:
+        if self.sidebar_mode == "notes":
+            self.notes_pane.side.render()
+            return
         self.shape = []
         self.render()
         self.list.invalidate_filter()
@@ -7570,7 +7783,8 @@ class Conn(Gtk.ApplicationWindow):
 
         session = Session(host, name, self.palette, self._session_exited,
                           screen=lambda h=host, n=name: self.screen_of(h, n),
-                          font=self.font, zoom=self.zoom, notice=self.notice)
+                          font=self.font, zoom=self.zoom, notice=self.notice,
+                          last_reply=lambda h=host, n=name: self.copy_reply(h, n))
         self.open[key] = session
         self.stack.add_named(session, f"{host}/{name}")
         self.show(session, focus)
@@ -7882,8 +8096,16 @@ class Conn(Gtk.ApplicationWindow):
             thread.join(timeout=max(0.0, deadline - time.monotonic()))
         connlog.event("conn restarting (exec the installed copy)")
         connlog.shutdown()
-        launcher = Path.home() / ".local" / "bin" / "conn"
-        installed = Path.home() / ".local" / "share" / "conn" / "app"
+        # The dev copy restarts into the dev install (conn-dev), never into
+        # the stable one -- CONN_CHANNEL is put back for the exec, but a
+        # dev window running the stable code would be the old bug in a new
+        # coat.
+        launcher = paths.LAUNCHER
+        installed = paths.INSTALLED
+        # The switch came out of the environment at start (run()); back in
+        # for the exec, so a checkout started as CONN_CHANNEL=dev python3
+        # main.py comes back as dev, not as the stable channel.
+        os.environ.update(CHANNEL_ENV)
         if APP_DIR == installed.resolve() and os.access(launcher, os.X_OK):
             try:
                 os.execv(str(launcher), [str(launcher)])
@@ -8351,6 +8573,15 @@ class ConnApp(Gtk.Application):
             *split_ref(target.get_string())))
         self.add_action(stop)
 
+    def send_notification(self, ident, note) -> None:  # noqa: D401
+        """Every notification the window sends comes through here, so the
+        dev copy's are off in one place (paths.notifications): it watches the
+        same chats as the stable conn, and with both sending, every needs-you
+        and every finish would arrive twice. CONN_DEV_NOTIFY=1 turns them
+        back on, for working on the notifications themselves."""
+        if paths.NOTIFY:
+            Gtk.Application.send_notification(self, ident, note)
+
     def send_sample_notification(self) -> None:
         """One notification about a real session, for looking at.
 
@@ -8369,8 +8600,10 @@ class ConnApp(Gtk.Application):
                                                        agent_state.DRAFT)),
                            sessions[0])
             def send():
-                self.send_notification(
-                    f"conn-{session_ref(hosts.LOCAL, session['name'])}",
+                # Past the dev gate: `conn-dev --notify` is a request to see
+                # one, not a chat that both copies noticed.
+                Gtk.Application.send_notification(
+                    self, f"conn-{session_ref(hosts.LOCAL, session['name'])}",
                     notification(hosts.LOCAL, session))
                 return GLib.SOURCE_REMOVE
             GLib.idle_add(send)
@@ -8416,6 +8649,11 @@ class ConnApp(Gtk.Application):
         window.present()
 
 
+# CONN_CHANNEL and CONN_DEV_NOTIFY as this process was started with them,
+# kept for restart() after run() has taken them out of the environment.
+CHANNEL_ENV: dict[str, str] = {}
+
+
 def run(service: bool = False, on_startup=None) -> int:
     """service is a D-Bus activation start (org.omarchy.conn.service).
 
@@ -8429,6 +8667,9 @@ def run(service: bool = False, on_startup=None) -> int:
     (ConnApp.do_startup) -- main.py starts the connection log there.
     """
     argv = [sys.argv[0], "--gapplication-service"] if service else None
+    # Read already (paths, at import); out of the environment now, before
+    # anything is started that would inherit it (paths.keep_to_self).
+    CHANNEL_ENV.update(paths.keep_to_self())
     return ConnApp(on_startup).run(argv)
 
 

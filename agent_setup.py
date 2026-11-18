@@ -47,7 +47,11 @@ COMMENT = "conn-agent@mini"
 BEGIN, END = "# >>> conn-agent (written by agent_setup.py)", "# <<< conn-agent"
 APP = "~/.local/share/conn-agent"
 FILES = ("conn_agent.py", "agent_api.py", "hosts.py", "chats.py",
-         "agent_state.py", "connlog.py", "notes.py", "starting.py")
+         "agent_state.py", "connlog.py", "notes.py", "starting.py",
+         # connlog and chats import it, for which copy of conn this is.
+         "paths.py",
+         # agent_api reads Claude's replies from their transcripts with it.
+         "transcript.py")
 LABEL = "co.ojm.conn-agent"
 REPO = Path(__file__).resolve().parent
 

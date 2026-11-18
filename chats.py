@@ -26,16 +26,17 @@ from pathlib import Path
 from typing import Iterable
 
 import agent_state
+import paths
 
 PROJECTS_FILE = Path("~/.config/conn/projects.toml").expanduser()
-FILTERS_STATE = Path.home() / ".local" / "state" / "conn" / "filters.json"
+FILTERS_STATE = paths.STATE / "filters.json"
 # Which finished chats have been looked at, per device (SPEC §3): {chat id:
 # the last_event that was showing when it was opened}.
-SEEN_STATE = Path.home() / ".local" / "state" / "conn" / "seen.json"
+SEEN_STATE = paths.STATE / "seen.json"
 # The chats each server last showed while it answered, so a server going dark
 # leaves its chats on the list (greyed) rather than taking them with it --
 # a chat you cannot see is one you forget. See remember() and build_chats().
-KNOWN_STATE = Path.home() / ".local" / "state" / "conn" / "known-chats.json"
+KNOWN_STATE = paths.STATE / "known-chats.json"
 
 # SPEC §8's tiles for the projects it knows, keyed by project id and by name
 # folded to letters, so "North Wind" finds northwind whatever its id is.

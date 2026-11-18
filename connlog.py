@@ -6,7 +6,9 @@ wake, whether the jump host answered, which ssh masters it closed, how long
 each stream lived. This keeps that record: state transitions and timings,
 one line each, in
 
-    ~/.local/state/conn/conn.log      (CONN_LOG=<path> puts it elsewhere)
+    ~/.local/state/conn/conn.log      (CONN_LOG=<path> puts it elsewhere;
+                                       the dev copy, CONN_CHANNEL=dev,
+                                       keeps its own in conn-dev/)
 
 rotated at about 1 MB with three old files kept. `conn --log` prints the end.
 
@@ -32,6 +34,8 @@ import threading
 import time
 from pathlib import Path
 
+import paths
+
 MAX_BYTES = 1_000_000
 BACKUPS = 3
 # At most one line per key per window; the rest are counted and summed up.
@@ -51,6 +55,7 @@ _clock = time.monotonic
 
 
 DEFAULT = "~/.local/state/conn/conn.log"
+DEV_DEFAULT = "~/.local/state/conn-dev/conn.log"
 
 
 def _expand(where) -> Path | None:
@@ -66,7 +71,15 @@ def path() -> Path:
     """Where the log lives: $CONN_LOG, or conn's state folder. Never raises:
     a $CONN_LOG or $XDG_STATE_HOME that cannot be expanded is passed over
     for the default, and if even that cannot be (no home at all) the result
-    is relative -- which setup() refuses to open."""
+    is relative -- which setup() refuses to open.
+
+    The dev copy's is in conn-dev/ instead of conn/: one log interleaving
+    two windows' wakes and streams would answer nothing it is kept for.
+    Read from the environment at each call, as the rest of this is -- all
+    but the channel, which is paths' reading at import: the window takes
+    CONN_CHANNEL out of the environment (paths.keep_to_self) once read."""
+    folder = paths.NAME
+    default = DEV_DEFAULT if folder == paths.DEV_NAME else DEFAULT
     override = os.environ.get("CONN_LOG")
     if override:
         found = _expand(override)
@@ -76,8 +89,8 @@ def path() -> Path:
     if state:
         found = _expand(state)
         if found is not None:
-            return found / "conn" / "conn.log"
-    return _expand(DEFAULT) or Path(DEFAULT)
+            return found / folder / "conn.log"
+    return _expand(default) or Path(default)
 
 
 class _Handler(logging.handlers.RotatingFileHandler):

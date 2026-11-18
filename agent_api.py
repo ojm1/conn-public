@@ -42,6 +42,7 @@ import connlog
 import hosts
 import notes as notes_mod
 import starting
+import transcript
 
 CONFIG_DIR = Path("~/.config/conn").expanduser()
 DEVICES = CONFIG_DIR / "devices.json"
@@ -51,11 +52,20 @@ PAIR_TTL = 300.0
 CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"     # nothing to misread
 MAX_BODY = 256 * 1024
 TASK_CAP = 64 * 1024
-REPLY_CAP = 32 * 1024
+REPLY_CAP = transcript.REPLY_CAP     # whole replies, from the transcript
 SSE_PING = 15.0
 MAX_CONNECTIONS = 48
 MAX_PER_CLIENT = 12
 HANDSHAKE_TIMEOUT = 10.0
+# The chat detail's ssh budget. The phone gives a request 20s
+# (timeoutIntervalForRequest, ios/Conn/API/ConnAPI.swift) and the detail can
+# need two round trips: the task (15s ceiling, once per chat) and the
+# transcript. The transcript gets at most TRANSCRIPT_TIMEOUT, and only what
+# is left of DETAIL_BUDGET after the task, so the two together stay under
+# the phone's limit -- a slow server is the screen's reply, not an error.
+DETAIL_BUDGET = 16.0
+TRANSCRIPT_TIMEOUT = 5.0
+TRANSCRIPT_FLOOR = 1.0      # less than this left is not worth an ssh
 PAIR_FAILURES = 10          # wrong codes a minute, from anyone, before a pause
 
 STATE_NAMES = {agent_state.NEEDS_YOU: "needs_you",
@@ -325,27 +335,10 @@ def permission_of(screen: str) -> dict | None:
     return {"kind": kind, "command": command or question, "options": options}
 
 
-def latest_reply(screen: str) -> str:
-    """Claude's last reply, whole: the "●" block's lines, de-indented,
-    line breaks kept, until the next block, prompt box or status line."""
-    claude = agent_state.AGENTS[0]
-    index, first = claude.reply(screen)
-    if index < 0:
-        return ""
-    lines = agent_state.strip_ansi(screen).splitlines()
-    out = [first]
-    for line in lines[index + 1:]:
-        stripped = line.strip()
-        # A new block, the box or a rule start at the left edge; the
-        # reply's own lines are indented, so "> quote" or "- item" in it
-        # do not end it.
-        if re.match(r"^[●⏺✻✶✽✢✳✱⋆*❯>─━╭╰]", line) or claude._is_rule(line):
-            break
-        if stripped and not line.startswith(("  ", "\t")):
-            break
-        out.append(line[2:] if line.startswith("  ") else line)
-    text = "\n".join(out).strip("\n")
-    return text[:REPLY_CAP]
+# The screen's reading of the reply now lives in transcript.py, beside the
+# transcript's, so the desktop can use it without importing an HTTPS server;
+# the names stay here for the tests and anything else that reads them.
+latest_reply = transcript.latest_reply
 
 
 # --------------------------------------------------------------------------
@@ -372,6 +365,10 @@ class Watch:
     seen_at: dict = field(default_factory=dict)          # id -> when opened
     star_wish: dict = field(default_factory=dict)        # id -> starred
     tasks: dict = field(default_factory=dict)            # (id, path) -> text
+    # id -> (what the chat looked like, reply text). Read from the transcript
+    # once per change of the chat rather than once per request: the phone
+    # asks again every time the chat is opened.
+    replies: dict = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock)
     listeners: list = field(default_factory=list)
     started: float = field(default_factory=time.time)
@@ -433,6 +430,7 @@ class Watch:
                 for gone in [k for k in book if k not in fresh]:
                     del book[gone]
             self.tasks = {k: v for k, v in self.tasks.items() if k[0] in fresh}
+            self.replies = {k: v for k, v in self.replies.items() if k in fresh}
             for name, data in events:
                 self._publish(name, data)
 
@@ -575,6 +573,13 @@ class Actions:
         except (OSError, subprocess.SubprocessError):
             return ""
         return done.stdout.decode(errors="replace") if not done.returncode else ""
+
+    def transcript(self, host, session,
+                   timeout: float = TRANSCRIPT_TIMEOUT) -> str:
+        """Claude's last reply from its transcript, or "" for the screen's
+        turn. One ssh round trip, at most `timeout`; see transcript.py."""
+        reply = transcript.fetch(host, session, timeout=timeout)
+        return reply.text if reply is not None else ""
 
 
 # --------------------------------------------------------------------------
@@ -734,6 +739,7 @@ class Api:
 
     @route("GET", f"/chats/{SEGMENT}/{SEGMENT}")
     def chat_detail(self, host, session, **_):
+        began = time.monotonic()
         chat = self._chat(host, session)
         cid = chat["id"]
         with self.watch.lock:
@@ -751,13 +757,44 @@ class Api:
                 self.watch.tasks[(cid, path)] = task
         detail.update({
             "task": task or "",
-            "latest_reply": latest_reply(screen),
+            "latest_reply": self._reply(
+                chat, host, session, screen,
+                DETAIL_BUDGET - (time.monotonic() - began)),
             "recap": agent.get("recap", ""),
             "started": int(sess.get("created") or 0),
             "windows": [],
         })
         self.watch.mark_seen(cid)
         return 200, detail
+
+    def _reply(self, chat, host, session, screen,
+               left: float = DETAIL_BUDGET) -> str:
+        """The reply's exact text from the transcript when there is one, the
+        screen's reading of it when not. Kept per chat until the chat's
+        stamp or state moves -- a new reply moves both -- so opening the
+        same chat twice is one ssh, not two. A miss is kept too: a server
+        without a transcript does not get asked again until something
+        changes. In the request thread, like task: never the watcher's."""
+        cid = chat["id"]
+        seen = (chat.get("last_event"), chat.get("state"))
+        with self.watch.lock:
+            kept = self.watch.replies.get(cid)
+        if kept is not None and kept[0] == seen:
+            text = kept[1]
+        elif chat.get("offline"):
+            text = ""
+        elif left < TRANSCRIPT_FLOOR:
+            # The task ssh used the time up: the screen now, and nothing
+            # kept, so the next open (task cached by then) asks.
+            text = ""
+        else:
+            text = self.actions.transcript(
+                host, session, timeout=min(TRANSCRIPT_TIMEOUT, left))
+            with self.watch.lock:
+                self.watch.replies[cid] = (seen, text)
+            connlog.event(f"api {cid}: reply from "
+                          + ("the transcript" if text else "the screen"))
+        return text or latest_reply(screen)
 
     @route("POST", "/chats")
     def chat_start(self, body, **_):
@@ -828,7 +865,8 @@ class Api:
         with self.watch.lock:
             sess = dict(self.watch.sessions.get(chat["id"]) or {})
         text = (sess.get("agent") or {}).get("recap") or \
-            latest_reply(sess.get("screen") or "").split("\n\n")[0]
+            self._reply(chat, host, session,
+                        sess.get("screen") or "").split("\n\n")[0]
         if not text.strip():
             raise ApiError(409, "nothing to save yet")
         try:

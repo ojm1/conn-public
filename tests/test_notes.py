@@ -11,6 +11,7 @@ directory, so it goes through exactly the ssh-less path a real call takes
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -166,6 +167,28 @@ def test_client(tmp: Path) -> None:
           sent == 1 and (tmp / "outbox/rejected/1-bad.json").exists()
           and not list((tmp / "outbox").glob("*.json"))
           and sum(n["text"] == "good one behind it" for n in client.list()) == 1)
+    # Another process flushing the same outbox (the stable conn and the dev
+    # copy share it) holds the lock: this one leaves the files to it rather
+    # than sending them a second time.
+    (tmp / "outbox" / "3-held.json").write_text(_json.dumps(
+        {"project": "widgets", "text": "held by the other", "source": "desktop"}))
+    other = subprocess.Popen(
+        [sys.executable, "-c", "import fcntl, sys, time; "
+         "f = open(sys.argv[1], 'a'); fcntl.flock(f, fcntl.LOCK_EX); "
+         "print('held', flush=True); time.sleep(30)",
+         str(tmp / "outbox" / ".flush.lock")], stdout=subprocess.PIPE,
+        text=True)
+    try:
+        other.stdout.readline()
+        held = client.flush()
+    finally:
+        other.kill()
+        other.wait()
+    check("flush: another process flushing means this one sends nothing",
+          held == 0 and (tmp / "outbox" / "3-held.json").exists(), f"sent={held}")
+    check("flush: and once it is done, the file goes",
+          client.flush() == 1
+          and not (tmp / "outbox" / "3-held.json").exists())
     check("program starts with REQUEST", NC.program({"op": "ping"})
           .startswith("REQUEST = "))
 

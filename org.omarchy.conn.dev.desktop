@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Conn dev
+GenericName=Server panel (dev copy)
+Comment=The dev copy of conn, beside the stable one -- for trying new code without giving up the conn you work in
+Exec=conn-dev
+Icon=org.omarchy.conn
+Terminal=false
+Categories=Network;RemoteAccess;
+StartupWMClass=org.omarchy.conn.dev
+Keywords=ssh;tmux;servers;agents;claude;dev;

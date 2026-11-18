@@ -23,6 +23,12 @@ the one taken just before shutdown is the one that survives. A session
 killed by hand drops out of the next snapshot, a minute later, and is not
 brought back.
 
+A resumed Claude in a folder it has to ask about -- always ~, whose "trust
+this folder" answer lasts one session only -- would sit at that question
+in every restored session until someone opened each one. These are
+conversations that were already running there before the reboot, so the
+restore answers it: it watches each resumed pane for a while and says yes.
+
 Anything Claude was in the middle of is lost: it comes back idle with its
 history, and the session carries @conn_restored (the time) so Conn can say
 "restored after reboot" until there is something newer to show.
@@ -220,7 +226,7 @@ def _dir(path: str) -> str:
 
 
 def restore(path: Path = STATE, force: bool = False,
-            now: float | None = None) -> list[str]:
+            now: float | None = None, trust_wait: float = 90) -> list[str]:
     """Recreate the last boot's sessions. Returns the names made."""
     data = load(path)
     here = boot_id()
@@ -235,46 +241,93 @@ def restore(path: Path = STATE, force: bool = False,
     except (OSError, subprocess.SubprocessError):
         return []
     stamp = str(int(now if now is not None else time.time()))
-    made = []
+    made, resumed = [], []
     for sess in data["sessions"]:
         name = sess["name"]
         if name in existing or not sess.get("windows"):
             continue
-        if not _make(sess, stamp):
+        panes = _make(sess, stamp)
+        if panes is None:
             continue
         made.append(name)
+        resumed += panes
     data["restored_in"] = here
     _write(data, path)
+    if resumed and trust_wait > 0:
+        accept_trust(resumed, trust_wait)
     return made
 
 
-def _new_pane(args: list[str], pane: dict) -> list[str]:
+# Claude's folder-trust question, as it draws it: the second option is yes.
+TRUST_MARK = "Yes, I trust this folder"
+
+
+def accept_trust(panes: list[str], wait: float, poll: float = 0.5) -> list[str]:
+    """Answer yes to the folder-trust question in each pane that shows it
+    within `wait` seconds. Returns the panes answered."""
+    answered: list[str] = []
+    pending = list(panes)
+    deadline = time.monotonic() + wait
+    while pending and time.monotonic() < deadline:
+        for pane in list(pending):
+            try:
+                out = _tmux("capture-pane", "-p", "-t", pane)
+            except (OSError, subprocess.SubprocessError):
+                out = None
+            if out is None or out.returncode != 0:
+                pending.remove(pane)        # the pane is gone
+                continue
+            if TRUST_MARK not in out.stdout:
+                continue
+            _tmux("send-keys", "-t", pane, "Down")
+            time.sleep(0.3)
+            _tmux("send-keys", "-t", pane, "Enter")
+            answered.append(pane)
+            pending.remove(pane)
+        if pending:
+            time.sleep(poll)
+    return answered
+
+
+def _new_pane(args: list[str], pane: dict) -> tuple[list[str], bool]:
+    """The tmux command for a pane, and whether it resumes Claude."""
     cmd = pane_command(pane)
-    return args + ["-c", _dir(pane.get("path", ""))] + ([cmd] if cmd else [])
+    return (args + ["-c", _dir(pane.get("path", ""))] + ([cmd] if cmd else []),
+            cmd is not None)
 
 
-def _make(sess: dict, stamp: str) -> bool:
+def _make(sess: dict, stamp: str) -> list[str] | None:
+    """Make one session. None if it could not be; else the ids of the
+    panes resuming Claude."""
     name = sess["name"]
     first = True
     active = None
+    resumed: list[str] = []
     for win in sess["windows"]:
         panes = win.get("panes") or [{"path": ""}]
         if first:
             args = ["new-session", "-d", "-s", name]
         else:
             args = ["new-window", "-d", "-t", f"={name}:"]
-        args += ["-P", "-F", "#{window_id}"]
+        args += ["-P", "-F", "#{window_id} #{pane_id}"]
         if win.get("name"):
             args += ["-n", win["name"]]
-        out = _tmux(*_new_pane(args, panes[0]))
+        cmd, is_claude = _new_pane(args, panes[0])
+        out = _tmux(*cmd)
         if out.returncode != 0:
             if first:
-                return False
+                return None
             continue
         first = False
-        target = out.stdout.strip()
+        target, _, pane_id = out.stdout.strip().partition(" ")
+        if is_claude and pane_id:
+            resumed.append(pane_id)
         for pane in panes[1:]:
-            _tmux(*_new_pane(["split-window", "-d", "-t", target], pane))
+            cmd, is_claude = _new_pane(["split-window", "-d", "-P", "-F",
+                                        "#{pane_id}", "-t", target], pane)
+            out = _tmux(*cmd)
+            if is_claude and out.returncode == 0 and out.stdout.strip():
+                resumed.append(out.stdout.strip())
         if len(panes) > 1:
             _tmux("select-layout", "-t", target, "tiled")
         if win.get("active"):
@@ -285,7 +338,7 @@ def _make(sess: dict, stamp: str) -> bool:
     _tmux("set-option", "-t", f"={name}:", "@conn_restored", stamp)
     if active:
         _tmux("select-window", "-t", active)
-    return True
+    return resumed
 
 
 def main(argv: list[str]) -> int:

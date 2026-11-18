@@ -273,10 +273,11 @@ server…, Edit projects…, Refresh now, Keys and marks… (`F1`), and Close Co
 | `ctrl-q` | Quit |
 | `ctrl-shift-c` / `ctrl-shift-v` | Copy / paste. Plain `ctrl-c` stays the interrupt |
 | `ctrl-shift-s` | Copy the whole screen -- no selection needed |
+| `ctrl-shift-y` | Copy Claude's last reply, word for word, from its transcript (also in the right-click and ⋯ menus) |
 | `ctrl-+` / `ctrl--` / `ctrl-0` | Text bigger, smaller, back to the terminal's own size |
 | `ctrl-shift-a` | Select everything on the screen |
 | `ctrl-click` a URL | Open it |
-| right-click in a session | Copy, paste, the whole screen, and every link on it -- including ones tmux wrapped |
+| right-click in a session | Copy, paste, the whole screen, Claude's last reply, and every link on it -- including ones tmux wrapped |
 | hover a session | A bin appears over its time: kill it, asked first -- there is no undo |
 | `ctrl-shift-k` | Kill the selected session |
 | `ctrl-shift-r` | Rename its tmux session -- local or remote, nothing running in it is interrupted |
@@ -374,6 +375,15 @@ so too, with the number of characters, because the alternative is finding out at
 
 `ctrl-shift-s` copies the **whole screen** and needs no selection at all -- conn already holds that
 text, it is the same capture the state is read from.
+
+`ctrl-shift-y` (or **Copy Claude's last reply** in the right-click menu and the chat's ⋯ menu)
+copies Claude's **last finished reply exactly as it wrote it** -- not as the screen wrapped it. Claude
+Code writes every conversation to `~/.claude/projects/*/<session id>.jsonl`; conn finds the claude
+running in the session's pane, reads the tail of that file on the server (plain `sh`, `tail` and
+`grep` -- nothing to install there) and takes the text of the last message that was not on its way
+to a tool call. While Claude is still working, that is the previous answer. When there is no
+transcript to read the copy comes from the screen instead, and the footer says so, since that one
+may be cut short. The phone's chat view gets the same text from the agent.
 
 ## When it has been replaced underneath it
 
@@ -509,6 +519,41 @@ mkdir -p ~/.local/share/dbus-1/services
 sed "s|/home/you|$HOME|" org.omarchy.conn.service \
   > ~/.local/share/dbus-1/services/org.omarchy.conn.service
 ```
+
+### A dev copy beside it
+
+To try a change without giving up the conn you are working in, install the checkout as a second,
+separate copy and run `conn-dev`:
+
+```bash
+mkdir -p ~/.local/share/conn-dev/app && cp *.py ~/.local/share/conn-dev/app/ && install -m755 bin/conn-dev ~/.local/bin/ && cp org.omarchy.conn.dev.desktop ~/.local/share/applications/
+```
+
+The `.desktop` file puts "Conn dev" in the launcher (Super+Space) beside Conn, and names the
+`org.omarchy.conn.dev` window in the bar and switcher, with conn's icon.
+
+`conn-dev` is conn with `CONN_CHANNEL=dev` (all of it is in `paths.py`):
+
+- its own application id, `org.omarchy.conn.dev`, so it opens a second window rather than handing
+  over to the running conn, and Hyprland's launch-or-focus for conn never grabs it;
+- its own state in `~/.local/state/conn-dev` -- started, the first time, from a copy of conn's
+  stars, order, filters and seen chats, then separate -- and its own `conn.log` there;
+- "dev" in yellow beside the name, and "conn dev" as the window title;
+- no desktop notifications, since the stable conn is already sending them for the same chats
+  (`CONN_DEV_NOTIFY=1 conn-dev` turns them on);
+- while the stable conn is running, it leaves the turn stamps (`@conn_last_event`) and the Haiku
+  chat titles to it, so the two never write the same option twice. It does not even queue titles
+  meanwhile, and takes over only after the stable conn has been gone 15 seconds -- a restart to
+  update is a blink, not a quit. What you do in it -- a star, a rename, a project, a reply -- it
+  writes, as the stable one does;
+- it keeps `CONN_CHANNEL` to itself: nothing it starts (terminals, ssh, a tmux server) inherits it,
+  and `bin/conn` clears it anyway, so a `conn` typed anywhere is always the stable one;
+- restart-to-update re-runs the dev install, never the stable one.
+
+Shared on purpose: `~/.config/conn` (projects, the notes outbox -- a flush lock keeps the two
+from sending a queued note twice) and the reboot snapshot that `--restore-sessions` reads. Leave
+`--snapshot-sessions`/`--restore-sessions` to the stable `conn`. Updating the dev copy is the same
+`cp` again, then restart it from its window.
 
 Colours follow the [Omarchy](https://omarchy.org) desktop theme when present, and fall back to a
 built-in palette otherwise. `CONN_THEME=light|dark` forces it. Read once, at startup: a theme

@@ -35,6 +35,7 @@ Inside the window:
   ctrl-shift-w   close the view        ctrl-shift-k  kill the session
   ctrl-shift-r   rename the session
   ctrl-shift-c/v copy / paste          ctrl-f        filter
+  ctrl-shift-y   copy Claude's last reply, from its transcript
   ctrl-+ - 0     text bigger, smaller, back to the terminal's own size
   ctrl-q         quit
   right-click    a host for new session, files, keys; a session to open or kill
@@ -52,6 +53,13 @@ CONN_THEME=light|dark forces the colours.
 
 The window logs connection events (never chat text) to
 ~/.local/state/conn/conn.log; CONN_LOG=<path> puts the log elsewhere.
+
+CONN_CHANNEL=dev (what conn-dev sets) runs a dev copy beside this one: its
+own window and app id, state in ~/.local/state/conn-dev (first started from
+a copy of conn's), its own log, "dev" beside the name. It sends no desktop
+notifications -- the stable conn already does, for the same chats -- unless
+CONN_DEV_NOTIFY=1, and leaves the turn stamps and chat titles to the stable
+conn while that is running.
 """
 
 # --check prints strings a remote can influence: ssh's auth banner lands in
@@ -107,6 +115,11 @@ def run_window(service: bool = False) -> int:
     the CLI modes are one-shot and do nothing the log is for, a second
     `conn` just hands over to the running one, and tests never come through
     here."""
+    import paths
+    if paths.DEV:
+        # Before gui reads anything: the dev copy's first run starts from
+        # the stable one's stars, order and filters (paths.seed).
+        paths.seed()
     try:
         from gui import run
     except (ImportError, ValueError) as exc:

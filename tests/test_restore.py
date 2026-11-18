@@ -74,10 +74,19 @@ def main() -> int:
         bindir.mkdir()
         log = tmp / "claude-args"
         fake = bindir / "claude"
-        fake.write_text(f"#!/bin/sh\necho \"$@\" >> {log}\npwd >> {log}\nsleep 30\n")
+        fake.write_text(f"#!/bin/bash\necho \"$@\" >> {log}\npwd >> {log}\n"
+                        "echo ' \u276f No, exit'\n"
+                        "echo '   Yes, I trust this folder'\n"
+                        f"read -r -s line; echo \"answered:$line\" | cat -v >> {log}\n"
+                        "sleep 30\n")
         fake.chmod(0o755)
         shell = bindir / "loginsh"
-        shell.write_text(f"#!/bin/bash\nexport PATH={bindir}:$PATH\nexec bash \"$@\"\n")
+        # Stands in for the login shell without reading the real profile, which
+        # would put the real claude back first on PATH. "-lc CMD" (restore's) and
+        # "-c CMD" (tmux's own, as $SHELL is its default shell) run CMD.
+        shell.write_text(f"#!/bin/bash\nexport PATH={bindir}:$PATH\n"
+                         "case $1 in -lc|-c) exec bash --noprofile --norc -c \"$2\";; esac\n"
+                         "exec bash --noprofile --norc\n")
         shell.chmod(0o755)
         os.environ["SHELL"] = str(shell)
         work = tmp / "work"
@@ -104,7 +113,7 @@ def main() -> int:
         state.write_text(json.dumps(snap))
         R.conversation_exists = lambda conv, projects=None: conv == "conv-1"
 
-        made = R.restore(state, now=1793900000)
+        made = R.restore(state, now=1793900000, trust_wait=10)
         check("restore: both sessions made", sorted(made) == ["chatty", "plain"],
               repr(made))
 
@@ -128,13 +137,16 @@ def main() -> int:
               tm("display", "-p", "-t", "=chatty:logs.0",
                  "#{pane_current_path}") == str(Path.home()))
         for _ in range(50):
-            if log.exists() and str(work) in log.read_text():
+            if log.exists() and "answered:" in log.read_text():
                 break
             time.sleep(0.1)
         got = log.read_text() if log.exists() else ""
         check("restore: claude resumed by id with its flags, in its folder",
               "--resume conv-1 --permission-mode auto" in got and str(work) in got,
               repr(got))
+
+        check("restore: the folder-trust question answered yes (Down, Enter)",
+              "answered:^[[B" in got or "answered:^[OB" in got, repr(got))
 
         again = R.restore(state)
         check("restore: only once per boot", again == [], repr(again))

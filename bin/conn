@@ -5,5 +5,9 @@
 [ -t 1 ] && printf '\033]0;conn\007'
 # No venv: what is left needs nothing from pip. PyGObject, GTK and VTE are
 # system packages, and a venv sealed off from them could not see GTK at all.
+# Always the stable channel: CONN_CHANNEL=dev can reach this shell from
+# anything the dev copy started (a tmux server it was first to start keeps
+# its environment for every pane), and would make this conn the dev one.
+unset CONN_CHANNEL CONN_DEV_NOTIFY
 APP="$HOME/.local/share/conn"
 exec python3 "$APP/app/main.py" "$@"
