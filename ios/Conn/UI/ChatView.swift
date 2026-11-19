@@ -1,4 +1,6 @@
 import SwiftUI
+import PhotosUI
+import UIKit
 
 /// One chat (iOSChat mockup): state, title, host and waiting time; the user's
 /// task as a bubble; Claude's latest reply as a card; permission buttons and
@@ -12,6 +14,8 @@ struct ChatView: View {
     @State private var detail: ChatDetail?
     @State private var loadError: String?
     @State private var replyText = ""
+    @State private var picked: [PhotosPickerItem] = []
+    @State private var attachments: [Attachment] = []
     @State private var sending = false
     @State private var answering = false
     @State private var actionError: String?
@@ -35,18 +39,13 @@ struct ChatView: View {
         }
         .background(Theme.bg)
         .navigationBarTitleDisplayMode(.inline)
+        // The list hides its bar for its own title row; this one keeps it,
+        // for the back button.
+        .toolbar(.visible, for: .navigationBar)
         .toolbarBackground(Theme.header, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
-                Button {
-                } label: {
-                    Image(systemName: "terminal")
-                        .frame(width: 44, height: 44)
-                }
-                .disabled(true)
-                .accessibilityLabel("Show terminal (coming later)")
-
                 Button {
                     toggleStar()
                 } label: {
@@ -77,10 +76,25 @@ struct ChatView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
                         LinkLine()
-                        if let detail = detail, !detail.task.isEmpty {
-                            taskBubble(detail, now: now)
+                        if let detail = detail, !detail.history.isEmpty {
+                            // The conversation, from Claude's transcript.
+                            let items = detail.history
+                            let lastClaude = items.lastIndex(where: { !$0.isYou })
+                            ForEach(Array(items.enumerated()), id: \.offset) { index, item in
+                                if item.isYou {
+                                    youBubble(item.text, at: item.at, now: now)
+                                } else {
+                                    claudeCard(item.text,
+                                               meta: index == lastClaude ? replyMeta(now: now)
+                                                   : claudeStamp(item.at, now: now))
+                                }
+                            }
+                        } else {
+                            if let detail = detail, !detail.task.isEmpty {
+                                taskBubble(detail, now: now)
+                            }
+                            replyCard(now: now)
                         }
-                        replyCard(now: now)
                         if chat?.state == .working {
                             workingLine
                         }
@@ -89,11 +103,17 @@ struct ChatView: View {
                     .padding(.horizontal, 16)
                     .padding(.top, 18)
                     .padding(.bottom, 12)
+                    // A tap on the conversation puts the keyboard away.
+                    .contentShape(Rectangle())
+                    .onTapGesture { replyFocused = false }
                 }
                 .scrollDismissesKeyboard(.interactively)
                 .refreshable { await load() }
                 .onChange(of: detail?.latestReply ?? "") { _, _ in
                     withAnimation { proxy.scrollTo("end", anchor: .bottom) }
+                }
+                .onChange(of: detail?.history.count ?? 0) { _, _ in
+                    proxy.scrollTo("end", anchor: .bottom)
                 }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -132,6 +152,71 @@ struct ChatView: View {
         .overlay(alignment: .bottom) {
             Rectangle().fill(Theme.divider).frame(height: 1)
         }
+    }
+
+    private func youBubble(_ text: String, at: TimeInterval, now: Date) -> some View {
+        VStack(alignment: .trailing, spacing: 5) {
+            Text(at > 0 ? "You · \(Format.stamp(Format.date(at), now: now))" : "You")
+                .font(Theme.ui(12))
+                .foregroundStyle(Theme.textMeta)
+            Text(text.trimmingCharacters(in: .whitespacesAndNewlines))
+                .font(Theme.ui(15.5))
+                .lineSpacing(3)
+                .foregroundStyle(Theme.textStrong)
+                .textSelection(.enabled)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 11)
+                .background(Theme.bubble, in: UnevenRoundedRectangle(
+                    topLeadingRadius: 18, bottomLeadingRadius: 18,
+                    bottomTrailingRadius: 5, topTrailingRadius: 18, style: .continuous))
+                .overlay(UnevenRoundedRectangle(
+                    topLeadingRadius: 18, bottomLeadingRadius: 18,
+                    bottomTrailingRadius: 5, topTrailingRadius: 18, style: .continuous)
+                    .stroke(Theme.border, lineWidth: 1))
+                .frame(maxWidth: 520, alignment: .trailing)
+        }
+        .frame(maxWidth: .infinity, alignment: .trailing)
+        .padding(.leading, 40)
+    }
+
+    private func claudeCard(_ text: String, meta: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Text("✻")
+                    .font(Theme.mono(12, weight: .bold))
+                    .foregroundStyle(Theme.claude)
+                    .frame(width: 20, height: 20)
+                    .background(Theme.claudeTile, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                Text(meta)
+                    .font(Theme.ui(12))
+                    .foregroundStyle(Theme.textMeta)
+            }
+            VStack(alignment: .leading, spacing: 12) {
+                Text(ReplyText.attributed(text))
+                    .font(Theme.ui(15))
+                    .lineSpacing(4)
+                    .foregroundStyle(Theme.textReply)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                ForEach(ReplyText.links(in: text), id: \.absoluteString) { url in
+                    previewButton(url)
+                }
+            }
+            .padding(.horizontal, 15)
+            .padding(.top, 14)
+            .padding(.bottom, 15)
+            .background(Theme.surface, in: UnevenRoundedRectangle(
+                topLeadingRadius: 18, bottomLeadingRadius: 5,
+                bottomTrailingRadius: 18, topTrailingRadius: 18, style: .continuous))
+            .overlay(UnevenRoundedRectangle(
+                topLeadingRadius: 18, bottomLeadingRadius: 5,
+                bottomTrailingRadius: 18, topTrailingRadius: 18, style: .continuous)
+                .stroke(Theme.divider, lineWidth: 1))
+        }
+    }
+
+    private func claudeStamp(_ at: TimeInterval, now: Date) -> String {
+        at > 0 ? "Claude Code · \(Format.stamp(Format.date(at), now: now))" : "Claude Code"
     }
 
     private func taskBubble(_ detail: ChatDetail, now: Date) -> some View {
@@ -269,7 +354,13 @@ struct ChatView: View {
                     .foregroundStyle(actionError != nil ? Theme.hostDarkText : Theme.textSecondary)
                     .padding(.horizontal, 4)
             }
-            quickActions
+            // Only Interrupt is left here, and only while Claude is working.
+            if chat?.state == .working {
+                quickActions
+            }
+            if !attachments.isEmpty {
+                attachmentStrip
+            }
             replyBar
         }
         .padding(.horizontal, 12)
@@ -315,8 +406,6 @@ struct ChatView: View {
                 if chat?.state == .working {
                     quickButton("Interrupt", enabled: !(chat?.offline ?? true)) { interrupt() }
                 }
-                quickButton("Save recap to notes", enabled: chat != nil) { saveRecap() }
-                quickButton("Open terminal", enabled: false) {}
             }
         }
     }
@@ -338,20 +427,61 @@ struct ChatView: View {
         .opacity(enabled ? 1 : 0.45)
     }
 
+    private var attachmentStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(attachments) { item in
+                    ZStack(alignment: .topTrailing) {
+                        Image(uiImage: item.thumb)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: 58, height: 58)
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            .overlay {
+                                if item.path == nil && item.error == nil {
+                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                        .fill(.black.opacity(0.45))
+                                    ProgressView().tint(.white)
+                                } else if item.error != nil {
+                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                        .stroke(Theme.hostDarkRing, lineWidth: 2)
+                                }
+                            }
+                        Button {
+                            attachments.removeAll { $0.id == item.id }
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 18))
+                                .symbolRenderingMode(.palette)
+                                .foregroundStyle(.white, .black.opacity(0.6))
+                        }
+                        .buttonStyle(.plain)
+                        .offset(x: 6, y: -6)
+                        .accessibilityLabel("Remove image")
+                    }
+                }
+            }
+            .padding(.top, 8)
+            .padding(.horizontal, 4)
+        }
+    }
+
     private var replyBar: some View {
         HStack(alignment: .bottom, spacing: 8) {
-            Button {
-            } label: {
+            PhotosPicker(selection: $picked, maxSelectionCount: 4, matching: .images) {
                 Image(systemName: "plus")
                     .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(Color(hex: 0xB3BAC6))
+                    .foregroundStyle(Color(hex: 0xD0D5DE))
                     .frame(width: 44, height: 44)
                     .background(Circle().fill(Theme.surface2))
             }
-            .buttonStyle(.plain)
-            .disabled(true)
-            .opacity(0.5)
-            .accessibilityLabel("Attach (coming later)")
+            .disabled(chat == nil || chat?.offline == true)
+            .accessibilityLabel("Add images")
+            .onChange(of: picked) { _, items in
+                guard !items.isEmpty else { return }
+                picked = []
+                for item in items { attach(item) }
+            }
 
             TextField("", text: $replyText,
                       prompt: Text("Reply to Claude").foregroundColor(Theme.textMeta),
@@ -377,7 +507,9 @@ struct ChatView: View {
 
     private var canSend: Bool {
         guard let chat = chat, !chat.offline, !sending else { return false }
+        if attachments.contains(where: { $0.path == nil && $0.error == nil }) { return false }
         return !replyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || attachments.contains(where: { $0.path != nil })
     }
 
     private var workingText: String {
@@ -409,8 +541,14 @@ struct ChatView: View {
         var parts = ["Claude Code"]
         if let chat = chat, chat.lastEvent > 0 {
             parts.append(Format.stamp(Format.date(chat.lastEvent), now: now))
-            if chat.state != .working, let detail = detail {
-                let ran = Format.span(from: detail.started, to: chat.lastEvent)
+            // How long the last turn took: your last message to Claude's
+            // answer, from the transcript. Not from the session's start --
+            // a tmux session weeks old said "ran 16d".
+            if chat.state != .working, let history = detail?.history,
+               let answered = history.last(where: { !$0.isYou }),
+               let asked = history.last(where: { $0.isYou && $0.at <= answered.at }),
+               asked.at > 0, answered.at > asked.at {
+                let ran = Format.span(from: asked.at, to: answered.at)
                 if !ran.isEmpty && ran != "now" { parts.append("ran \(ran)") }
             }
         }
@@ -457,16 +595,48 @@ struct ChatView: View {
     private func send() {
         let text = replyText
         guard canSend else { return }
+        // The images go as their paths on the server, after the words:
+        // Claude Code reads an image it is given the path of.
+        let sent = attachments.filter { $0.path != nil }
+        let paths = sent.compactMap(\.path)
+        let words = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let message = [words, paths.joined(separator: "\n")]
+            .filter { !$0.isEmpty }.joined(separator: "\n\n")
         sending = true
         actionError = nil
         Task {
-            let failure = await model.reply(ref, text: text)
+            let failure = await model.reply(ref, text: message)
             sending = false
             if let failure = failure {
                 actionError = "Not sent: \(failure)"
             } else {
                 if replyText == text { replyText = "" }
+                let ids = Set(sent.map(\.id))
+                attachments.removeAll { ids.contains($0.id) }
                 Haptics.tap()
+            }
+        }
+    }
+
+    /// A picked photo: shrunk to a JPEG, shown at once, sent to the chat's
+    /// server in the background.
+    private func attach(_ item: PhotosPickerItem) {
+        Task {
+            guard let raw = try? await item.loadTransferable(type: Data.self),
+                  let jpeg = Attachment.jpeg(from: raw),
+                  let thumb = UIImage(data: jpeg) else {
+                actionError = "That image could not be read"
+                return
+            }
+            let entry = Attachment(thumb: thumb)
+            attachments.append(entry)
+            let got = await model.uploadImage(ref, jpeg: jpeg)
+            guard let index = attachments.firstIndex(where: { $0.id == entry.id }) else { return }
+            if let path = got.path {
+                attachments[index].path = path
+            } else {
+                attachments[index].error = got.error ?? "not sent"
+                actionError = "Image not sent: \(got.error ?? "no answer")"
             }
         }
     }
@@ -490,21 +660,6 @@ struct ChatView: View {
         }
     }
 
-    private func saveRecap() {
-        actionError = nil
-        notice = nil
-        Task {
-            if let failure = await model.saveRecap(ref) {
-                actionError = failure
-            } else {
-                notice = "Saved to notes"
-                Haptics.success()
-                try? await Task.sleep(nanoseconds: 2_500_000_000)
-                if notice == "Saved to notes" { notice = nil }
-            }
-        }
-    }
-
     private func toggleStar() {
         guard let chat = chat else { return }
         Task {
@@ -524,5 +679,30 @@ private struct OptionStyle: ViewModifier {
         } else {
             content.buttonStyle(SecondaryButtonStyle())
         }
+    }
+}
+
+
+/// An image on its way into a reply.
+struct Attachment: Identifiable {
+    let id = UUID()
+    let thumb: UIImage
+    var path: String?
+    var error: String?
+
+    /// The photo as a JPEG no bigger than `maxSide` on its long edge: what
+    /// Claude needs to see it, at a size the phone sends quickly.
+    static func jpeg(from data: Data, maxSide: CGFloat = 2048) -> Data? {
+        guard let image = UIImage(data: data) else { return nil }
+        let size = image.size
+        guard size.width > 0, size.height > 0 else { return nil }
+        let scale = min(1, maxSide / max(size.width, size.height))
+        let target = CGSize(width: floor(size.width * scale), height: floor(size.height * scale))
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let drawn = UIGraphicsImageRenderer(size: target, format: format).image { _ in
+            image.draw(in: CGRect(origin: .zero, size: target))
+        }
+        return drawn.jpegData(compressionQuality: 0.8)
     }
 }

@@ -42,8 +42,14 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         # The agent is on the local network at a bare IP with its own
         # certificate, which the app pins itself (API/ConnAPI.swift).
+        # And from outside the office, at the office's public IP: iOS's
+        # default rules refuse a self-signed certificate there before the
+        # app's own check runs. The app still accepts only the certificate
+        # it pinned at pairing (PinningDelegate), so nothing else gets in.
+        # NSAllowsArbitraryLoads alone: with NSAllowsLocalNetworking beside
+        # it, iOS ignores it, and the LAN would be the only place that works.
         NSAppTransportSecurity:
-          NSAllowsLocalNetworking: true
+          NSAllowsArbitraryLoads: true
         NSLocalNetworkUsageDescription: >-
           Conn talks to the Conn agent on your Mac over the local
           network to show your chats and notes.
@@ -61,3 +67,6 @@ targets:
         SWIFT_VERSION: "5.9"
         TARGETED_DEVICE_FAMILY: "1,2"
         GENERATE_INFOPLIST_FILE: NO
+        # Assets.xcassets/AppIcon: icons/conn-ios-1024.png, one size; Xcode
+        # makes the rest.
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon

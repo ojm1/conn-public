@@ -41,6 +41,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var notes: [Note] = []
     @Published private(set) var loaded = false
     @Published var link: LinkState = .connecting
+    /// iOS's own words for the last unreachable, shown under the line.
+    @Published var linkDetail: String = ""
     @Published var tab: AppTab = .chats
     /// A chat to open in the Chats tab (from New, Notes or a link).
     @Published var openRequest: ChatRef?
@@ -93,6 +95,14 @@ final class AppModel: ObservableObject {
             if la != lb { return la > lb }
             return (order[a.id] ?? 0) < (order[b.id] ?? 0)
         }
+    }
+
+    /// The projects notes are filed under: the real ones from projects.toml,
+    /// most recently active first -- not the one-server stand-ins the agent
+    /// makes for servers outside any project (`implicit`).
+    var noteProjects: [Project] {
+        let real = recentProjects.filter { !$0.implicit }
+        return real.isEmpty ? recentProjects : real
     }
 
     // MARK: Pairing
@@ -223,7 +233,7 @@ final class AppModel: ObservableObject {
             return error.localizedDescription
         }
         switch apiError {
-        case .unreachable: link = .unreachable
+        case .unreachable(let why): link = .unreachable; linkDetail = why
         case .unauthorized: link = .unpaired; stopEvents()
         case .certificateChanged: link = .certificateChanged; stopEvents()
         case .server, .badResponse: break
@@ -363,6 +373,7 @@ final class AppModel: ObservableObject {
                             project: current.project, title: current.title,
                             state: option.isDeny ? .idle : .working,
                             lastEvent: current.lastEvent, preview: current.preview,
+                            doing: current.doing,
                             starred: current.starred, offline: current.offline,
                             permission: nil))
             }
@@ -375,6 +386,13 @@ final class AppModel: ObservableObject {
 
     func reply(_ ref: ChatRef, text: String) async -> String? {
         await run { api in try await api.reply(ref, text: text) }
+    }
+
+    /// The image's path on the chat's server, or the reason it did not go.
+    func uploadImage(_ ref: ChatRef, jpeg: Data) async -> (path: String?, error: String?) {
+        var path: String?
+        let failure = await run { api in path = try await api.uploadImage(ref, jpeg: jpeg) }
+        return (path, failure)
     }
 
     func interrupt(_ ref: ChatRef) async -> String? {
@@ -403,6 +421,13 @@ final class AppModel: ObservableObject {
         await run { api in
             let note = try await api.createNote(project: project, text: text, source: "phone")
             self.upsert(note)
+        }
+    }
+
+    func editNote(_ note: Note, text: String) async -> String? {
+        await run { api in
+            let updated = try await api.updateNote(id: note.id, text: text)
+            self.upsert(updated)
         }
     }
 

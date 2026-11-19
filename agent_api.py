@@ -16,6 +16,8 @@ transitions.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import fcntl
 import hashlib
 import hmac
@@ -28,7 +30,9 @@ import shlex
 import ssl
 import subprocess
 import threading
+import sys
 import time
+import traceback
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from http import HTTPStatus
@@ -51,6 +55,11 @@ TLS_DIR = CONFIG_DIR / "agent-tls"
 PAIR_TTL = 300.0
 CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"     # nothing to misread
 MAX_BODY = 256 * 1024
+# An image from the phone, base64 in JSON: only on POST .../images, and only
+# read once the device is known to be paired.
+MAX_IMAGE_BODY = 16 * 1024 * 1024
+IMAGE_BYTES = 10 * 1024 * 1024
+IMAGE_TYPES = {"jpg": b"\xff\xd8\xff", "png": b"\x89PNG\r\n\x1a\n"}
 TASK_CAP = 64 * 1024
 REPLY_CAP = transcript.REPLY_CAP     # whole replies, from the transcript
 SSE_PING = 15.0
@@ -450,6 +459,8 @@ class Watch:
             "id": chat.id, "host": chat.host, "session": chat.session,
             "project": chat.project, "title": chat.title, "state": state,
             "last_event": chat.last_event, "preview": chat.preview,
+            # What it is on now, under the name that holds still; "" if none.
+            "doing": chatmod.doing(chat),
             "starred": chat.starred, "offline": False,
             "permission": (permission_of(screen)
                            if chat.state == agent_state.NEEDS_YOU else None),
@@ -542,6 +553,35 @@ class Actions:
     def reply(self, host, session, text) -> None:
         starting.send_text(host, session, text)
 
+    def upload_image(self, host, data: bytes, ext: str) -> str:
+        """Put an image from the phone on `host`, in ~/.conn/uploads, and
+        return its full path there -- what goes in the reply, since Claude
+        Code reads an image named by its path. One ssh, the file inside the
+        script as base64 (the script is already the ssh's stdin)."""
+        name = f"{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3)}.{ext}"
+        encoded = base64.encodebytes(data).decode("ascii")
+        script = (
+            'd="$HOME/.conn/uploads"\n'
+            'mkdir -p "$d" && chmod 700 "$d" || exit 1\n'
+            f'f="$d/{name}"\n'
+            "cat > \"$f.b64\" <<'CONN_IMAGE_END'\n"
+            f"{encoded}"
+            "CONN_IMAGE_END\n"
+            # GNU and current macOS take -d; older macOS only -D.
+            '{ base64 -d < "$f.b64" > "$f" 2>/dev/null || '
+            'base64 -D < "$f.b64" > "$f"; } || { rm -f "$f" "$f.b64"; exit 1; }\n'
+            'rm -f "$f.b64"\n'
+            'printf "%s\\n" "$f"\n')
+        try:
+            done = subprocess.run(hosts.run_argv(host), input=script.encode(),
+                                  capture_output=True, timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            raise ApiError(502, f"{host} did not answer")
+        path = done.stdout.decode("utf-8", "replace").strip().splitlines()
+        if done.returncode or not path or not path[-1].endswith(name):
+            raise ApiError(502, f"could not save the image on {host}")
+        return path[-1]
+
     def interrupt(self, host, session) -> None:
         starting.interrupt(host, session)
 
@@ -575,11 +615,12 @@ class Actions:
         return done.stdout.decode(errors="replace") if not done.returncode else ""
 
     def transcript(self, host, session,
-                   timeout: float = TRANSCRIPT_TIMEOUT) -> str:
-        """Claude's last reply from its transcript, or "" for the screen's
-        turn. One ssh round trip, at most `timeout`; see transcript.py."""
+                   timeout: float = TRANSCRIPT_TIMEOUT):
+        """Claude's last reply from its transcript (a transcript.Reply, the
+        conversation's end with it), or "" for the screen's turn. One ssh
+        round trip, at most `timeout`; see transcript.py."""
         reply = transcript.fetch(host, session, timeout=timeout)
-        return reply.text if reply is not None else ""
+        return reply if reply is not None and reply.text else ""
 
 
 # --------------------------------------------------------------------------
@@ -755,11 +796,15 @@ class Api:
             task = self.actions.task(host, path)      # once per chat, then kept
             with self.watch.lock:
                 self.watch.tasks[(cid, path)] = task
+        reply, history = self._reply(
+            chat, host, session, screen,
+            DETAIL_BUDGET - (time.monotonic() - began), with_history=True)
         detail.update({
             "task": task or "",
-            "latest_reply": self._reply(
-                chat, host, session, screen,
-                DETAIL_BUDGET - (time.monotonic() - began)),
+            "latest_reply": reply,
+            # The conversation's end, from the transcript: [] when there is
+            # none, and the phone shows task + latest_reply as before.
+            "history": history,
             "recap": agent.get("recap", ""),
             "started": int(sess.get("created") or 0),
             "windows": [],
@@ -768,7 +813,7 @@ class Api:
         return 200, detail
 
     def _reply(self, chat, host, session, screen,
-               left: float = DETAIL_BUDGET) -> str:
+               left: float = DETAIL_BUDGET, with_history: bool = False):
         """The reply's exact text from the transcript when there is one, the
         screen's reading of it when not. Kept per chat until the chat's
         stamp or state moves -- a new reply moves both -- so opening the
@@ -779,8 +824,9 @@ class Api:
         seen = (chat.get("last_event"), chat.get("state"))
         with self.watch.lock:
             kept = self.watch.replies.get(cid)
+        history: list = []
         if kept is not None and kept[0] == seen:
-            text = kept[1]
+            text, history = kept[1], kept[2]
         elif chat.get("offline"):
             text = ""
         elif left < TRANSCRIPT_FLOOR:
@@ -788,13 +834,18 @@ class Api:
             # kept, so the next open (task cached by then) asks.
             text = ""
         else:
-            text = self.actions.transcript(
+            got = self.actions.transcript(
                 host, session, timeout=min(TRANSCRIPT_TIMEOUT, left))
+            if isinstance(got, str):
+                text = got
+            else:
+                text, history = got.text, list(got.history)
             with self.watch.lock:
-                self.watch.replies[cid] = (seen, text)
+                self.watch.replies[cid] = (seen, text, history)
             connlog.event(f"api {cid}: reply from "
                           + ("the transcript" if text else "the screen"))
-        return text or latest_reply(screen)
+        text = text or latest_reply(screen)
+        return (text, history) if with_history else text
 
     @route("POST", "/chats")
     def chat_start(self, body, **_):
@@ -822,6 +873,30 @@ class Api:
             raise ApiError(502, str(exc))
         connlog.event(f"api: reply to {host}/{session}")
         return 204, None
+
+    @route("POST", f"/chats/{SEGMENT}/{SEGMENT}/images")
+    def chat_image(self, host, session, body, **_):
+        """{"data": base64, "type": "jpg" | "png"} -> {"path": ...}: the image
+        saved on the chat's server, for the phone to put in its reply."""
+        self._live(host, session)
+        body = body or {}
+        ext = body.get("type")
+        if ext not in IMAGE_TYPES:
+            raise ApiError(400, "type is jpg or png")
+        raw = body.get("data")
+        if not isinstance(raw, str) or not raw:
+            raise ApiError(400, "data is the image, base64")
+        try:
+            data = base64.b64decode(raw, validate=True)
+        except (binascii.Error, ValueError):
+            raise ApiError(400, "data is not base64")
+        if len(data) > IMAGE_BYTES:
+            raise ApiError(413, "image too large")
+        if not data.startswith(IMAGE_TYPES[ext]):
+            raise ApiError(400, f"that is not a {ext}")
+        path = self.actions.upload_image(host, data, ext)
+        connlog.event(f"api: image to {host}/{session} ({len(data) // 1024} KB)")
+        return 200, {"path": path}
 
     @route("POST", f"/chats/{SEGMENT}/{SEGMENT}/approve")
     def chat_approve(self, host, session, body, **_):
@@ -1029,7 +1104,7 @@ class Handler(BaseHTTPRequestHandler):
         if body:
             self.wfile.write(body)
 
-    def _body(self):
+    def _body(self, limit: int = MAX_BODY):
         """The JSON object sent, or None. Only a plain Content-Length is
         taken: anything else could have us read without end."""
         if self.headers.get("Transfer-Encoding"):
@@ -1038,7 +1113,7 @@ class Handler(BaseHTTPRequestHandler):
         if not raw_length.isdigit():
             raise ApiError(400, "bad Content-Length")
         length = int(raw_length)
-        if length > MAX_BODY:
+        if length > limit:
             raise ApiError(413, "too large")
         raw = self.rfile.read(length) if length else b""
         if len(raw) != length:
@@ -1057,7 +1132,9 @@ class Handler(BaseHTTPRequestHandler):
             device = self._device()
             if device is None and not (method == "POST" and parts.path == "/pair"):
                 raise ApiError(401, "not paired")
-            body = self._body()
+            image = (device is not None and method == "POST"
+                     and parts.path.endswith("/images"))
+            body = self._body(MAX_IMAGE_BODY if image else MAX_BODY)
             if method == "GET" and parts.path == "/events":
                 self._events(device)
                 return
@@ -1168,8 +1245,20 @@ class Server(ThreadingHTTPServer):
     def handle_error(self, request, client_address) -> None:
         # A failed handshake or a dropped socket is a fact of networks, not
         # a traceback on stderr.
-        connlog.limited(("api", "conn-error", client_address[0]),
-                        f"api: a connection from {client_address[0]} failed")
+        # The kind of failure, never what was sent: an SSL alert from the
+        # client (it refused the certificate) reads very differently from a
+        # handler that raised.
+        error = sys.exc_info()[1]
+        why = type(error).__name__ if error is not None else "unknown"
+        if isinstance(error, ssl.SSLError):
+            why += f" {getattr(error, 'reason', '') or ''}".rstrip()
+        elif error is not None and not isinstance(error, OSError):
+            frame = traceback.extract_tb(error.__traceback__)[-1:]
+            if frame:
+                why += f" at {Path(frame[0].filename).name}:{frame[0].lineno}"
+        connlog.limited(("api", "conn-error", client_address[0], why),
+                        f"api: a connection from {client_address[0]} failed "
+                        f"({why})")
 
 
 def tls_context(directory: Path = TLS_DIR) -> tuple[ssl.SSLContext, str]:

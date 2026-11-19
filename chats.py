@@ -243,10 +243,28 @@ def autotitle_in_force(options: dict, pane_title: str) -> str:
     return ""
 
 
+def doing(chat) -> str:
+    """What the chat is on now, in a few words: @conn_autotitle when it says
+    something the name does not -- the row's second line, under the name
+    that holds still. "" when there is none, or it is the name already."""
+    auto = (getattr(chat, "autotitle", "") or "").strip()
+    if auto and auto.lower() != (getattr(chat, "title", "") or "").strip().lower():
+        return auto
+    return ""
+
+
 def title_for(options: dict, pane_title: str, session: str,
               hostname: str | Iterable[str] = ()) -> str:
-    """@conn_name, else @conn_autotitle, else the pane title without its
-    status glyph, else @conn_title, else the session name (SPEC §2).
+    """@conn_name, else the pane title without its status glyph (Claude's
+    own name for the conversation), else @conn_autotitle, else @conn_title,
+    else the session name (SPEC §2).
+
+    Claude's title is the name because it holds still: it is set from the
+    conversation's first topic and kept. @conn_autotitle (retitle.py) follows
+    whatever the chat did last, so as the name it changed under you -- "Privacy
+    policy scan" one hour, "Launch plan" the next, for the same Breeze site
+    chat. It is the row's second line now (Chat.activity), and the name only
+    while Claude has not named the chat itself.
 
     A name the user gave the chat outranks everything: they typed it because
     the rest was wrong. @conn_title is only what the starter wrote down
@@ -259,11 +277,6 @@ def title_for(options: dict, pane_title: str, session: str,
     own = (options.get("name") or "").strip()
     if own:
         return own
-    # Conn's own up-to-date title (retitle.py) over Claude's, which is
-    # fixed at the conversation's first topic.
-    auto = autotitle_in_force(options, pane_title)
-    if auto:
-        return auto
     names = {hostname} if isinstance(hostname, str) else set(hostname)
     names = {name.lower() for name in names if name}
     names |= {name.split(".")[0] for name in names}
@@ -273,6 +286,9 @@ def title_for(options: dict, pane_title: str, session: str,
         if cleaned and cleaned.lower() not in _GENERIC \
                 and cleaned.lower() not in names:
             return cleaned
+    auto = autotitle_in_force(options, pane_title)
+    if auto:
+        return auto
     title = (options.get("title") or "").strip()
     if title:
         return title

@@ -7594,7 +7594,9 @@ class Conn(Gtk.ApplicationWindow):
                 parts["time"].add_css_class(name)
             else:
                 parts["time"].remove_css_class(name)
-        parts["preview"].set_label(chat.preview
+        # What it is on now (the auto-title) under the name that holds still,
+        # else what it last said.
+        parts["preview"].set_label(chats.doing(chat) or chat.preview
                                    or agent_state.LABELS.get(state, ""))
         page = ("none" if chat.offline else "needs" if chat.finished
                 else BADGES.get(state, "none"))
@@ -7646,6 +7648,8 @@ class Conn(Gtk.ApplicationWindow):
             lines.append(f"{chat.host} is not answering: this is the chat as "
                          "it was last seen" + (f" ({was})" if was else "")
                          + ". Open it to try the server again.")
+        if chats.doing(chat):
+            lines.append(f"Now: {chats.doing(chat)}")
         words = chat.preview or agent_state.LABELS.get(chat.state, "")
         if words:
             lines.extend(textwrap.wrap(words, 60)[:4])

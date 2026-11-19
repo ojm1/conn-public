@@ -92,15 +92,22 @@ check("due: never over the user's own name",
 
 check("title: the user's name beats the autotitle",
       chats.title_for({"name": "Mine", "autotitle": "Auto"}, "✳ Claude's", "s") == "Mine")
-check("title: the autotitle beats Claude's stale title",
+check("title: Claude's own title holds; the autotitle is the second line",
       chats.title_for({"autotitle": "PO calendar"}, "✳ Server crash status", "s")
-      == "PO calendar")
+      == "Server crash status"
+      and chats.doing(SimpleNamespace(title="Server crash status",
+                                      autotitle="PO calendar")) == "PO calendar")
+check("title: no second line when the autotitle is the name already",
+      chats.doing(SimpleNamespace(title="PO calendar", autotitle="PO calendar")) == ""
+      and chats.doing(SimpleNamespace(title="X", autotitle="")) == "")
+check("title: the autotitle names a chat Claude has not named",
+      chats.title_for({"autotitle": "PO calendar"}, "✳ Claude Code", "s") == "PO calendar")
 check("title: a new conversation's Claude title beats an old autotitle",
       chats.title_for({"autotitle": "PO calendar", "autotitle_for": "✳ Server crash status"},
                       "✳ Telegram retries", "s") == "Telegram retries")
-check("title: the autotitle holds while Claude's title is unchanged",
+check("title: Claude's title stays the name while the autotitle moves on",
       chats.title_for({"autotitle": "PO calendar", "autotitle_for": "Server crash status"},
-                      "✳ Server crash status", "s") == "PO calendar")
+                      "✳ Server crash status", "s") == "Server crash status")
 check("title: Claude's title when there is no autotitle",
       chats.title_for({}, "✳ Server crash status", "s") == "Server crash status")
 

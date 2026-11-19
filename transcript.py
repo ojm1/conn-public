@@ -42,7 +42,8 @@ import re
 import secrets
 import shlex
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 
 import agent_state
 import hosts
@@ -54,6 +55,10 @@ OUT_LINES = 400
 # transcripts is ~80 KB. The phone gets this much too (agent_api re-exports
 # it), so it stays bounded.
 REPLY_CAP = 128 * 1024
+# The conversation the phone shows: the last HISTORY_ITEMS messages, yours and
+# Claude's answers, and no more than HISTORY_CAP characters of them in all.
+HISTORY_ITEMS = 30
+HISTORY_CAP = 256 * 1024
 TIMEOUT = 15
 UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
                   r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
@@ -98,7 +103,8 @@ echo "${m}MOVED $moved"
 echo "${m}SIZE $size"
 echo "${m}TAIL"
 if [ "$size" -gt %(tail)d ]; then tail -c %(tail)d "$f" | sed 1d; else cat "$f"; fi \
-  | grep -a '"type": *"assistant"' | tail -n %(lines)d | tail -c %(out)d
+  | awk '/"type": *"assistant"/ || (/"type": *"user"/ && !/"tool_use_id"/)' \
+  | tail -n %(lines)d | tail -c %(out)d
 """
 
 
@@ -109,6 +115,9 @@ class Reply:
     uuid: str = ""          # the reply's last line: changes when a new one lands
     busy: bool = False      # Claude is past it, on a turn not finished yet
     moved: bool = False     # read from the background job the chat went to
+    # The conversation's end: {"role": "you" | "claude", "text", "at"}, oldest
+    # first, "at" in unix seconds (0 when the line had no timestamp).
+    history: list = field(default_factory=list)
 
 
 def script(session: str, token: str) -> str:
@@ -198,6 +207,109 @@ def pick(entries: list[dict]) -> Reply | None:
     return None
 
 
+def _when(entry: dict) -> float:
+    stamp = entry.get("timestamp")
+    if not isinstance(stamp, str) or not stamp:
+        return 0.0
+    try:
+        return datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def _typed(entry: dict) -> str:
+    """What you typed, if this user record is a message from you: not a
+    tool's result, a system notice or a subagent's prompt. Newer versions
+    say so (origin.kind "human"); older ones are judged by their content."""
+    if entry.get("type") != "user" or entry.get("isSidechain") \
+            or entry.get("isMeta"):
+        return ""
+    origin = entry.get("origin")
+    if isinstance(origin, dict) and origin.get("kind") not in (None, "human"):
+        return ""
+    message = entry.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, str):
+        texts = [content]
+    elif isinstance(content, list):
+        if any(isinstance(b, dict) and b.get("type") == "tool_result"
+               for b in content):
+            return ""
+        texts = [b.get("text", "") for b in content
+                 if isinstance(b, dict) and b.get("type") == "text"]
+    else:
+        return ""
+    text = "\n\n".join(t for t in texts if isinstance(t, str)).strip()
+    # Command echoes and injected context, written as the user's turn.
+    if text.startswith("<") or text.startswith("Caveat:"):
+        return ""
+    return text
+
+
+def conversation(entries: list[dict]) -> list[dict]:
+    """Your messages and Claude's answers among transcript records, oldest
+    first: each answer the way pick() finds the reply (a message's text
+    blocks joined, the narration before tool calls left out), each of yours
+    as typed. Capped to the last HISTORY_ITEMS, and HISTORY_CAP characters."""
+    items: list[dict] = []
+    groups: dict[str, dict] = {}
+    for entry in entries:
+        typed = _typed(entry)
+        if typed:
+            items.append({"role": "you", "text": typed[:REPLY_CAP],
+                          "at": _when(entry)})
+            continue
+        if entry.get("type") != "assistant" or entry.get("isSidechain") \
+                or entry.get("isApiErrorMessage"):
+            continue
+        message = entry.get("message")
+        if not isinstance(message, dict) or message.get("model") == "<synthetic>":
+            continue
+        key = str(message.get("id") or entry.get("uuid") or len(items))
+        group = groups.get(key)
+        if group is None:
+            group = groups[key] = {"role": "claude", "texts": [], "tool": False,
+                                   "stop": None, "at": 0.0, "seen": set()}
+            items.append(group)
+        uuid = str(entry.get("uuid") or "")
+        if uuid and uuid in group["seen"]:
+            continue
+        group["seen"].add(uuid)
+        group["stop"] = message.get("stop_reason") or group["stop"]
+        group["at"] = _when(entry) or group["at"]
+        content = message.get("content")
+        if isinstance(content, str):
+            content = [{"type": "text", "text": content}]
+        for block in content if isinstance(content, list) else []:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use":
+                group["tool"] = True
+            elif block.get("type") == "text" and isinstance(block.get("text"), str):
+                group["texts"].append(block["text"])
+
+    out: list[dict] = []
+    for item in items:
+        if item["role"] == "you":
+            out.append(item)
+            continue
+        if item["tool"] or item["stop"] == "tool_use":
+            continue                # narration on the way to a tool call
+        text = "\n\n".join(t.strip("\n") for t in item["texts"]
+                           if t.strip()).strip()
+        if text:
+            out.append({"role": "claude", "text": text[:REPLY_CAP],
+                        "at": item["at"]})
+    out = out[-HISTORY_ITEMS:]
+    total = 0
+    for index in range(len(out) - 1, -1, -1):
+        total += len(out[index]["text"])
+        if total > HISTORY_CAP:
+            out = out[index + 1:]
+            break
+    return out
+
+
 def parse(out: str, token: str) -> Reply | None:
     """The script's output -> Reply, or None for "not found"."""
     marker = f"###{token}:"
@@ -212,9 +324,11 @@ def parse(out: str, token: str) -> Reply | None:
     session_id = meta.get("SESSION", "")
     if not UUID.match(session_id):
         return None
-    reply = pick(records(tail.splitlines()))
+    entries = records(tail.splitlines())
+    reply = pick(entries)
     if reply is None:
         return None
+    reply.history = conversation(entries)
     reply.session_id = session_id
     reply.moved = bool(meta.get("MOVED"))
     reply.busy = reply.busy or meta.get("STATUS") == "busy"

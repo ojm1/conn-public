@@ -155,8 +155,9 @@ struct PairingView: View {
 
     private func message(for failure: APIError, address: AgentAddress) -> String {
         switch failure {
-        case .unreachable:
-            return "Can't reach the Mac mini at \(address.label). Check this iPhone is on the same network and that Conn may use the local network (Settings › Privacy › Local Network), then try again."
+        case .unreachable(let why):
+            let detail = why.isEmpty ? "" : " (\(why))"
+            return "Can't reach the Mac mini at \(address.label)\(detail). Check the address and port, and that Conn may use the local network (Settings › Privacy › Local Network), then try again."
         case .certificateChanged:
             return "The Mac mini's certificate doesn't start with what you typed. Check the sha256 that conn_agent.py pair printed."
         case .server(let status, let text):

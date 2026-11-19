@@ -78,7 +78,7 @@ enum APIError: Error, Equatable {
 /// `pinned == nil` is trust-on-first-use, used only for POST /pair: the
 /// certificate seen is recorded (and, if you typed the start of the
 /// fingerprint `conn_agent.py pair` printed, checked against it).
-final class PinningDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
+final class PinningDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     private let lock = NSLock()
     private let pinned: String?
     private let expectedPrefix: String?
@@ -130,6 +130,16 @@ final class PinningDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
             return (.useCredential, URLCredential(trust: trust))
         }
         return (.cancelAuthenticationChallenge, nil)
+    }
+
+    // The same check per task. bytes(for:) -- the events stream -- asks the
+    // task, not the session, and with nobody answering there iOS checked the
+    // self-signed certificate its own way and refused it (-1202), so the
+    // list loaded and the live updates never did.
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    didReceive challenge: URLAuthenticationChallenge) async
+        -> (URLSession.AuthChallengeDisposition, URLCredential?) {
+        await urlSession(session, didReceive: challenge)
     }
 
     private func record(_ print: String, accepted: Bool) {
@@ -196,6 +206,15 @@ struct StartChatRequest: Encodable {
         case includeNotes = "include_notes"
         case fromNote = "from_note"
     }
+}
+
+private struct ImageBody: Encodable {
+    let data: String
+    let type: String
+}
+
+private struct ImagePath: Decodable {
+    let path: String
 }
 
 private struct NewNoteBody: Encodable {
@@ -308,6 +327,16 @@ final class ConnAPI: @unchecked Sendable {
                             body: try encoder.encode(TextBody(text: text)))
     }
 
+    /// POST /chats/{host}/{session}/images -> {"path"}: a JPEG saved on the
+    /// chat's server, for the reply to name (Claude Code reads an image from
+    /// its path).
+    func uploadImage(_ ref: ChatRef, jpeg: Data) async throws -> String {
+        let got: ImagePath = try await call(
+            "POST", ["chats", ref.host, ref.session, "images"],
+            body: try encoder.encode(ImageBody(data: jpeg.base64EncodedString(), type: "jpg")))
+        return got.path
+    }
+
     /// POST /chats/{host}/{session}/approve -> 204. 409 if that option is no
     /// longer on screen.
     func approve(_ ref: ChatRef, key: String) async throws {
@@ -415,7 +444,7 @@ final class ConnAPI: @unchecked Sendable {
                     request.timeoutInterval = 45
                     let result: (URLSession.AsyncBytes, URLResponse)
                     do {
-                        result = try await self.streamSession.bytes(for: request)
+                        result = try await self.streamSession.bytes(for: request, delegate: self.pinning)
                     } catch {
                         throw self.mapTransport(error)
                     }
@@ -490,7 +519,9 @@ final class ConnAPI: @unchecked Sendable {
         if pinning.refusedCertificate { return APIError.certificateChanged }
         if let urlError = error as? URLError {
             if urlError.code == .cancelled && Task.isCancelled { return CancellationError() }
-            return APIError.unreachable(urlError.localizedDescription)
+            // The code too: "-1200" says more than "An SSL error has
+            // occurred" when someone reads it back off the phone.
+            return APIError.unreachable("\(urlError.localizedDescription) [\(urlError.code.rawValue)]")
         }
         return APIError.unreachable(error.localizedDescription)
     }

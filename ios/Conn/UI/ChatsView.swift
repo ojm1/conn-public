@@ -78,9 +78,7 @@ struct ChatListView: View {
         TimelineView(.periodic(from: .now, by: 30)) { context in
             list(now: context.date)
         }
-        .navigationTitle("Chats")
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
+        .tabTitle("Chats") {
                 Button {
                     model.compose = ComposeRequest(kind: .chat, project: projectFilter)
                 } label: {
@@ -95,7 +93,6 @@ struct ChatListView: View {
                 .buttonStyle(.plain)
                 .keyboardShortcut("n", modifiers: .command)
                 .accessibilityLabel("New chat")
-            }
         }
         .background {
             // Cmd+K: search.
@@ -145,6 +142,7 @@ struct ChatListView: View {
             }
         }
         .listStyle(.plain)
+        .scrollDismissesKeyboard(.interactively)
         .scrollContentBackground(.hidden)
         .background(Theme.bg)
         .refreshable { await model.refresh(force: true) }
@@ -201,6 +199,7 @@ struct ChatListView: View {
                 .font(Theme.ui(16))
                 .foregroundStyle(Theme.text)
                 .focused($searchFocused)
+                .keyboardDone()
                 .submitLabel(.search)
                 .autocorrectionDisabled()
                 .textInputAutocapitalization(.never)
@@ -397,7 +396,7 @@ struct ChatListView: View {
             if let server = serverFilter, chat.host != server { return false }
             if needle.isEmpty { return true }
             let projectName = model.project(chat.project)?.name ?? chat.project
-            let haystack = [chat.title, chat.host, chat.session, projectName, chat.preview]
+            let haystack = [chat.title, chat.host, chat.session, projectName, chat.preview, chat.doing]
                 .joined(separator: " ").lowercased()
             return haystack.contains(needle)
         }
@@ -437,7 +436,8 @@ struct ChatListView: View {
     private func previewText(_ chat: Chat) -> String {
         if chat.offline { return "\(chat.host) is not answering" }
         if chat.permission != nil { return "Wants to run a command" }
-        return chat.preview
+        // What it is on now, under the name that holds still.
+        return chat.doing.isEmpty ? chat.preview : chat.doing
     }
 
     private func timeColor(_ state: ChatState) -> Color {

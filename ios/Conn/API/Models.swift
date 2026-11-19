@@ -63,6 +63,9 @@ struct Chat: Codable, Hashable, Identifiable {
     let state: ChatState
     let lastEvent: TimeInterval
     let preview: String
+    /// What it is on now (Conn's auto-title), under the name that holds
+    /// still; "" when there is none.
+    let doing: String
     let starred: Bool
     let offline: Bool
     let permission: Permission?
@@ -72,12 +75,13 @@ struct Chat: Codable, Hashable, Identifiable {
     enum CodingKeys: String, CodingKey {
         case id, host, session, project, title, state
         case lastEvent = "last_event"
-        case preview, starred, offline, permission
+        case preview, doing, starred, offline, permission
     }
 
     init(id: String, host: String, session: String, project: String,
          title: String, state: ChatState, lastEvent: TimeInterval,
-         preview: String, starred: Bool, offline: Bool, permission: Permission?) {
+         preview: String, doing: String = "", starred: Bool, offline: Bool,
+         permission: Permission?) {
         self.id = id
         self.host = host
         self.session = session
@@ -86,6 +90,7 @@ struct Chat: Codable, Hashable, Identifiable {
         self.state = state
         self.lastEvent = lastEvent
         self.preview = preview
+        self.doing = doing
         self.starred = starred
         self.offline = offline
         self.permission = permission
@@ -103,6 +108,7 @@ struct Chat: Codable, Hashable, Identifiable {
         state = try c.decodeIfPresent(ChatState.self, forKey: .state) ?? .idle
         lastEvent = try c.decodeIfPresent(Double.self, forKey: .lastEvent) ?? 0
         preview = try c.decodeIfPresent(String.self, forKey: .preview) ?? ""
+        doing = try c.decodeIfPresent(String.self, forKey: .doing) ?? ""
         starred = try c.decodeIfPresent(Bool.self, forKey: .starred) ?? false
         offline = try c.decodeIfPresent(Bool.self, forKey: .offline) ?? false
         permission = try c.decodeIfPresent(Permission.self, forKey: .permission)
@@ -110,12 +116,33 @@ struct Chat: Codable, Hashable, Identifiable {
 
     func with(starred: Bool) -> Chat {
         Chat(id: id, host: host, session: session, project: project, title: title,
-             state: state, lastEvent: lastEvent, preview: preview, starred: starred,
-             offline: offline, permission: permission)
+             state: state, lastEvent: lastEvent, preview: preview, doing: doing,
+             starred: starred, offline: offline, permission: permission)
     }
 }
 
-/// `ChatDetail` = Chat plus task, latest_reply, recap, started, windows.
+/// One message of the conversation, from Claude's transcript: yours or
+/// Claude's answer, `at` in unix seconds (0 when unknown).
+struct HistoryItem: Decodable, Hashable {
+    let role: String
+    let text: String
+    let at: TimeInterval
+
+    var isYou: Bool { role == "you" }
+
+    enum CodingKeys: String, CodingKey { case role, text, at }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        role = try c.decodeIfPresent(String.self, forKey: .role) ?? "claude"
+        text = try c.decodeIfPresent(String.self, forKey: .text) ?? ""
+        at = try c.decodeIfPresent(Double.self, forKey: .at) ?? 0
+    }
+}
+
+/// `ChatDetail` = Chat plus task, latest_reply, recap, started, windows,
+/// and history (the conversation's end; empty from an older agent or a chat
+/// with no transcript).
 struct ChatDetail: Decodable, Hashable {
     let chat: Chat
     let task: String
@@ -123,11 +150,12 @@ struct ChatDetail: Decodable, Hashable {
     let recap: String
     let started: TimeInterval
     let windows: [String]
+    let history: [HistoryItem]
 
     enum CodingKeys: String, CodingKey {
         case task
         case latestReply = "latest_reply"
-        case recap, started, windows
+        case recap, started, windows, history
     }
 
     init(from decoder: Decoder) throws {
@@ -138,6 +166,7 @@ struct ChatDetail: Decodable, Hashable {
         recap = try c.decodeIfPresent(String.self, forKey: .recap) ?? ""
         started = try c.decodeIfPresent(Double.self, forKey: .started) ?? 0
         windows = try c.decodeIfPresent([String].self, forKey: .windows) ?? []
+        history = try c.decodeIfPresent([HistoryItem].self, forKey: .history) ?? []
     }
 }
 

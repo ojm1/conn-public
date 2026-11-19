@@ -62,7 +62,7 @@ struct HostsView: View {
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
         .background(Theme.bg)
-        .navigationTitle("Hosts")
+        .tabTitle("Hosts")
         .refreshable { await model.refresh(force: true) }
         .confirmationDialog("Unpair this device?", isPresented: $confirmUnpair, titleVisibility: .visible) {
             Button("Unpair", role: .destructive) {

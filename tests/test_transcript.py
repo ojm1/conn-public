@@ -91,6 +91,50 @@ def test_pick(T) -> None:
           T.records(["", "garbage", "[1,2]", '{"type":"x"}']) == [{"type": "x"}])
 
 
+def test_conversation(T) -> None:
+    import json as _j
+    def user(text, **extra):
+        d = {"type": "user", "message": {"role": "user", "content": text},
+             "timestamp": "2026-11-19T01:00:00.000Z"}
+        d.update(extra)
+        return d
+    def claude(mid, blocks, stop="end_turn", at="2026-11-19T01:05:00.000Z"):
+        return {"type": "assistant", "timestamp": at,
+                "message": {"id": mid, "model": "m", "stop_reason": stop,
+                            "content": blocks}}
+    entries = [
+        user("first question", origin={"kind": "human"}),
+        claude("m1", [{"type": "text", "text": "looking"},
+                      {"type": "tool_use", "id": "t", "name": "Bash"}], "tool_use"),
+        user([{"type": "tool_result", "tool_use_id": "t", "content": "out"}]),
+        claude("m2", [{"type": "text", "text": "first answer"}]),
+        user("<command-name>/clear</command-name>"),
+        user("a notice", origin={"kind": "task-notification"}),
+        user("injected", isMeta=True),
+        user([{"type": "text", "text": "second"}, {"type": "image"}],
+             origin={"kind": "human"}),
+        claude("m3", [{"type": "text", "text": "second answer"}],
+               at="2026-11-19T01:20:00.000Z"),
+    ]
+    got = T.conversation(entries)
+    check("conversation: your messages and Claude's answers, in order",
+          [(g["role"], g["text"]) for g in got] == [
+              ("you", "first question"), ("claude", "first answer"),
+              ("you", "second"), ("claude", "second answer")], repr(got))
+    check("conversation: tool narration, results, commands and notices left out",
+          not any(g["text"] in ("looking", "out", "a notice", "injected")
+                  for g in got))
+    check("conversation: times are unix seconds",
+          got[-1]["at"] - got[-2]["at"] == 20 * 60, repr([g["at"] for g in got]))
+    many = []
+    for i in range(50):
+        many += [user(f"q{i}", origin={"kind": "human"}),
+                 claude(f"a{i}", [{"type": "text", "text": f"a{i}"}])]
+    got = T.conversation(many)
+    check("conversation: only the last HISTORY_ITEMS",
+          len(got) == T.HISTORY_ITEMS and got[-1]["text"] == "a49")
+
+
 def test_parse(T) -> None:
     tok = "abc123"
     tail = "\n".join(lines("transcript_turn.jsonl"))
@@ -245,6 +289,7 @@ def main() -> int:
     import transcript as T
     try:
         test_pick(T)
+        test_conversation(T)
         test_parse(T)
         test_fallback(T)
         test_lookup(T, tmp)

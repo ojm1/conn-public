@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// Notes (iOSNotes mockup): project chips with counts, note cards, a jot
 /// box above the tab bar. Swipe a card to mark it done or delete it.
@@ -22,6 +23,9 @@ struct NotesView: View {
     @State private var cardError: [String: String] = [:]
     @State private var jotError: String?
     @FocusState private var jotFocused: Bool
+    /// The project picked in the jot box's own menu, over the default.
+    @State private var jotPick: String?
+    @State private var editing: Note?
 
     /// Notes for the chosen chip, done ones last and only when asked for.
     private var shown: [Note] {
@@ -37,19 +41,19 @@ struct NotesView: View {
         }.count
     }
 
-    /// Where a jotted note goes: the chosen chip, else the busiest project.
+    /// Where a jotted note goes: what its menu says, else the chosen chip,
+    /// else the most recently busy real project.
     private var jotProject: Project? {
+        if let id = jotPick, let project = model.project(id) { return project }
         if let id = model.notesProject, let project = model.project(id) { return project }
-        return model.recentProjects.first
+        return model.noteProjects.first
     }
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 60)) { context in
             list(now: context.date)
         }
-        .navigationTitle("Notes")
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
+        .tabTitle("Notes") {
                 Button {
                     model.compose = ComposeRequest(kind: .note, project: model.notesProject)
                 } label: {
@@ -63,11 +67,17 @@ struct NotesView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("New note")
-            }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             jotBox
         }
+        .sheet(item: $editing) { note in
+            NoteEditor(note: note)
+                .presentationDragIndicator(.visible)
+                .presentationBackground(Theme.surface2)
+        }
+        // Filtering to a project points the jot box at it too.
+        .onChange(of: model.notesProject) { _, _ in jotPick = nil }
     }
 
     private func list(now: Date) -> some View {
@@ -142,6 +152,7 @@ struct NotesView: View {
             }
         }
         .listStyle(.plain)
+        .scrollDismissesKeyboard(.interactively)
         .scrollContentBackground(.hidden)
         .background(Theme.bg)
         .refreshable { await model.refresh(force: true) }
@@ -152,7 +163,7 @@ struct NotesView: View {
     private var chips: some View {
         let counts = Dictionary(grouping: model.notes.filter { !$0.isDone }, by: { $0.project })
             .mapValues { $0.count }
-        let withNotes = model.recentProjects.filter { (counts[$0.id] ?? 0) > 0 || $0.id == model.notesProject }
+        let withNotes = model.noteProjects
         return ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 Button {
@@ -204,8 +215,9 @@ struct NotesView: View {
                 .lineSpacing(3)
                 .foregroundStyle(note.isOpen || note.isRecap ? Color(hex: 0xE3E7ED) : Theme.textDim)
                 .strikethrough(note.isDone, color: Theme.textMeta)
-                .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .onTapGesture { editing = note }
             HStack(spacing: 8) {
                 Text(footer(note, when: when))
                     .font(Theme.ui(12.5))
@@ -226,6 +238,24 @@ struct NotesView: View {
         .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(Theme.divider, lineWidth: 1))
         .opacity(busy.contains(note.id) ? 0.6 : 1)
+        .contextMenu {
+            Button { editing = note } label: { Label("Edit", systemImage: "pencil") }
+            Button { UIPasteboard.general.string = note.text } label: {
+                Label("Copy", systemImage: "doc.on.doc")
+            }
+            if note.isDone {
+                Button { run(note) { await model.setNoteStatus(note, "open") } } label: {
+                    Label("Reopen", systemImage: "arrow.uturn.backward")
+                }
+            } else {
+                Button { run(note) { await model.setNoteStatus(note, "done") } } label: {
+                    Label("Mark done", systemImage: "checkmark")
+                }
+            }
+            Button(role: .destructive) { run(note) { await model.deleteNote(note) } } label: {
+                Label("Delete", systemImage: "trash")
+            }
+        }
     }
 
     private func footer(_ note: Note, when: String) -> String {
@@ -319,13 +349,42 @@ struct NotesView: View {
                     .padding(.horizontal, 6)
             }
             HStack(spacing: 6) {
+                Menu {
+                    ForEach(model.noteProjects) { project in
+                        Button {
+                            jotPick = project.id
+                        } label: {
+                            if project.id == jotProject?.id {
+                                Label(project.name, systemImage: "checkmark")
+                            } else {
+                                Text(project.name)
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(jotProject?.name ?? "Project")
+                            .lineLimit(1)
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 10, weight: .bold))
+                    }
+                    .font(Theme.ui(13.5, weight: .semibold))
+                    .foregroundStyle(Theme.textChip)
+                    .padding(.horizontal, 10)
+                    .frame(height: 30)
+                    .background(Theme.raised, in: Capsule())
+                    .frame(minHeight: 44)
+                    .contentShape(Rectangle())
+                }
+                .accessibilityLabel("File under \(jotProject?.name ?? "a project")")
                 TextField("", text: $jot,
-                          prompt: Text("Jot a note for \(jotProject?.name ?? "a project")").foregroundColor(Theme.textMeta),
+                          prompt: Text("Jot a note").foregroundColor(Theme.textMeta),
                           axis: .vertical)
                     .font(Theme.ui(16))
                     .foregroundStyle(Theme.textStrong)
                     .lineLimit(1...4)
                     .focused($jotFocused)
+                    .keyboardDone()
                     .submitLabel(.done)
                     .padding(.vertical, 11)
                 if !jot.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -352,7 +411,7 @@ struct NotesView: View {
                     .accessibilityLabel("Save note")
                 }
             }
-            .padding(.leading, 16)
+            .padding(.leading, 6)
             .padding(.trailing, 4)
             .frame(minHeight: 44)
             .background(Theme.surface2, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
@@ -391,6 +450,83 @@ struct NotesView: View {
             } else {
                 if jot.trimmingCharacters(in: .whitespacesAndNewlines) == text { jot = "" }
                 Haptics.success()
+            }
+        }
+    }
+}
+
+
+/// A note, opened to change its words. Save sends them; the swipe down or
+/// Cancel leaves it as it was.
+@MainActor
+struct NoteEditor: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    let note: Note
+
+    @State private var text = ""
+    @State private var saving = false
+    @State private var failure: String?
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 8) {
+                if let project = model.project(note.project) {
+                    Text(project.name)
+                        .font(Theme.ui(13, weight: .semibold))
+                        .foregroundStyle(Theme.textMeta)
+                }
+                TextEditor(text: $text)
+                    .font(Theme.ui(16))
+                    .foregroundStyle(Theme.textStrong)
+                    .scrollContentBackground(.hidden)
+                    .focused($focused)
+                    .keyboardDone()
+                if let failure = failure {
+                    Text(failure)
+                        .font(Theme.ui(13))
+                        .foregroundStyle(Theme.hostDarkText)
+                }
+            }
+            .padding(16)
+            .background(Theme.surface2)
+            .navigationTitle("Edit note")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar(.visible, for: .navigationBar)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(saving ? "Saving…" : "Save") { save() }
+                        .disabled(saving || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
+        .onAppear {
+            text = note.text
+            focused = true
+        }
+    }
+
+    private func save() {
+        let words = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !words.isEmpty else { return }
+        if words == note.text.trimmingCharacters(in: .whitespacesAndNewlines) {
+            dismiss()
+            return
+        }
+        saving = true
+        failure = nil
+        Task {
+            let problem = await model.editNote(note, text: words)
+            saving = false
+            if let problem = problem {
+                failure = problem
+            } else {
+                Haptics.success()
+                dismiss()
             }
         }
     }

@@ -192,6 +192,7 @@ struct NewSheet: View {
                 .foregroundStyle(Theme.textStrong)
                 .scrollContentBackground(.hidden)
                 .focused($textFocused)
+                .keyboardDone()
                 .padding(.horizontal, 9)
                 .padding(.vertical, 6)
         }

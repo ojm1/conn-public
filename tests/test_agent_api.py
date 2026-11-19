@@ -537,6 +537,13 @@ def test_transcript_reply(tmp: Path) -> None:
         check("transcript: the API shape is unchanged",
               set(detail) >= {"task", "latest_reply", "recap", "started",
                               "windows"})
+        history = detail.get("history") or []
+        check("transcript: the conversation comes too, yours then Claude's",
+              [h["role"] for h in history][-2:] == ["you", "claude"]
+              and history[-2]["text"] == "Fix the export, please."
+              and history[-1]["text"] == detail["latest_reply"]
+              and all(isinstance(h["at"], (int, float)) for h in history),
+              repr(history)[:300])
         api.call("GET", "/chats/web/export", {}, None, phone)
         check("transcript: opened again with nothing changed, no second ssh",
               len(ran) == 1, str(len(ran)))
@@ -570,6 +577,54 @@ def test_transcript_reply(tmp: Path) -> None:
         TR.subprocess.run = real
 
 
+def test_images(tmp: Path) -> None:
+    """A photo from the phone: the route checks it, and the real
+    Actions.upload_image script saves it -- run through sh with HOME pointed
+    at a folder of the test's own, in place of the ssh."""
+    import base64 as B
+    import hosts as H
+    store = N.Store(tmp / "notes-img")
+    actions = FakeActions(store)
+    actions.upload_image = API.Actions.upload_image.__get__(actions)
+    watch = API.Watch()
+    devices = API.Devices(tmp / "d-img.json", tmp / "c-img.json")
+    api = API.Api(watch, devices, actions)
+    phone, _ = devices.create("iPhone")
+    feed(watch, rows_for(CLAUDE["boxed prompt"], A.NEEDS_YOU), projects(tmp))
+    home = tmp / "img-home"
+    home.mkdir()
+    real = H.run_argv
+    H.run_argv = lambda host, opts=None: ["env", f"HOME={home}", "sh"]
+    jpeg = b"\xff\xd8\xff\xe0" + bytes(range(256)) * 400
+
+    def call(body):
+        try:
+            return api.call("POST", "/chats/web/export/images", {}, body, phone)
+        except API.ApiError as exc:
+            return exc.status, str(exc)
+    try:
+        status, got = call({"type": "jpg", "data": B.b64encode(jpeg).decode()})
+        path = Path(got["path"]) if status == 200 else None
+        check("images: a jpeg is saved on the chat's server, its path returned",
+              status == 200 and path is not None
+              and path.parent == home / ".conn" / "uploads"
+              and path.read_bytes() == jpeg
+              and not list(path.parent.glob("*.b64")), repr((status, got))[:200])
+        check("images: the uploads folder is private",
+              path is not None and (path.parent.stat().st_mode & 0o777) == 0o700)
+        check("images: not base64 is refused",
+              call({"type": "jpg", "data": "%%%"})[0] == 400)
+        check("images: a type it is not is refused",
+              call({"type": "jpg", "data": B.b64encode(b"GIF89a....").decode()})[0] == 400)
+        check("images: only jpg and png",
+              call({"type": "exe", "data": B.b64encode(jpeg).decode()})[0] == 400)
+        big = b"\xff\xd8\xff" + b"0" * (API.IMAGE_BYTES + 1)
+        check("images: too large is refused",
+              call({"type": "jpg", "data": B.b64encode(big).decode()})[0] == 413)
+    finally:
+        H.run_argv = real
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
@@ -578,6 +633,7 @@ def main() -> int:
         test_devices(tmp)
         test_api(tmp)
         test_transcript_reply(tmp)
+        test_images(tmp)
         test_finished(tmp)
         test_flicker_and_overlays(tmp)
         test_live_prompt_only()

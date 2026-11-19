@@ -273,7 +273,9 @@ struct LinkLine: View {
         case .ok, .connecting:
             EmptyView()
         case .unreachable:
-            line(text: "Can't reach the Mac mini", button: "Retry") { model.retry() }
+            line(text: model.linkDetail.isEmpty ? "Can't reach the Mac mini"
+                     : "Can't reach the Mac mini: \(model.linkDetail)",
+                 button: "Retry") { model.retry() }
         case .unpaired:
             line(text: "This device is no longer paired", button: "Pair again") {
                 Task { await model.unpair(revoke: false) }
@@ -359,4 +361,69 @@ enum Haptics {
     static func tap() {
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
     }
+}
+
+
+// MARK: - Tab title
+
+/// The top of each tab: its name, large, with its one action beside it.
+/// Drawn here rather than as the navigation bar's large title, which iOS 27
+/// left blank under the app's bar colours while still keeping its height --
+/// a band of empty space above every list.
+struct TabTitle<Action: View>: ViewModifier {
+    let title: String
+    @ViewBuilder let action: () -> Action
+
+    func body(content: Content) -> some View {
+        content
+            .toolbar(.hidden, for: .navigationBar)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                HStack(alignment: .center) {
+                    Text(title)
+                        .font(Theme.ui(30, weight: .bold))
+                        .foregroundStyle(Theme.textStrong)
+                    Spacer(minLength: 8)
+                    action()
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 4)
+                .padding(.bottom, 6)
+                .background(Theme.bg)
+            }
+    }
+}
+
+extension View {
+    func tabTitle<Action: View>(_ title: String,
+                                @ViewBuilder action: @escaping () -> Action) -> some View {
+        modifier(TabTitle(title: title, action: action))
+    }
+
+    func tabTitle(_ title: String) -> some View {
+        modifier(TabTitle(title: title) { EmptyView() })
+    }
+}
+
+
+// MARK: - Keyboard
+
+extension View {
+    /// A Done button over the keyboard while this field has it. The app's
+    /// text boxes are multi-line, where Return is a new line, so without
+    /// this the keyboard could not be put away at all.
+    func keyboardDone() -> some View {
+        toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("Done") { hideKeyboard() }
+                    .font(Theme.ui(16, weight: .semibold))
+            }
+        }
+    }
+}
+
+@MainActor
+func hideKeyboard() {
+    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder),
+                                    to: nil, from: nil, for: nil)
 }
