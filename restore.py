@@ -216,7 +216,11 @@ def pane_command(pane: dict, exists=None) -> str | None:
     # default-shell, which is not always the login shell that has claude.
     sh = shlex.quote(os.environ.get("SHELL") or "/bin/bash")
     flags = " ".join(shlex.quote(f) for f in pane.get("flags", []))
-    inner = f"claude --resume {shlex.quote(conv)} {flags}".rstrip() \
+    # set -m: job control, so Claude runs in its own process group and is
+    # the pane's foreground command. Without it tmux reports the pane as
+    # the shell around it, and Conn files the chat as a plain shell.
+    inner = "set -m; " \
+        + f"claude --resume {shlex.quote(conv)} {flags}".rstrip() \
         + f"; exec {sh} -l"
     return f"exec {sh} -lc {shlex.quote(inner)}"
 

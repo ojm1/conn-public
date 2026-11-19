@@ -78,7 +78,9 @@ def main() -> int:
                         "echo ' \u276f No, exit'\n"
                         "echo '   Yes, I trust this folder'\n"
                         f"read -r -s line; echo \"answered:$line\" | cat -v >> {log}\n"
-                        "sleep 30\n")
+                        # As a script its argv[0] is bash, which tmux would
+                        # name the pane; the real claude is a binary.
+                        "exec -a claude sleep 30\n")
         fake.chmod(0o755)
         shell = bindir / "loginsh"
         # Stands in for the login shell without reading the real profile, which
@@ -145,6 +147,12 @@ def main() -> int:
               "--resume conv-1 --permission-mode auto" in got and str(work) in got,
               repr(got))
 
+        check("restore: Claude is the pane's foreground command, so it lists "
+              "as a chat",
+              tm("display", "-p", "-t", "=chatty:main.0",
+                 "#{pane_current_command}") == "claude",
+              tm("display", "-p", "-t", "=chatty:main.0",
+                 "#{pane_current_command}"))
         check("restore: the folder-trust question answered yes (Down, Enter)",
               "answered:^[[B" in got or "answered:^[OB" in got, repr(got))
 
