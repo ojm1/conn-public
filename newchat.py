@@ -214,6 +214,39 @@ class Choice(Gtk.MenuButton):
         self.dot.set_visible(bool(tone))
 
 
+class Clamp(Gtk.Widget):
+    """One child, as wide as it likes up to `limit`, centred in the rest.
+    It asks for no more than the child's own minimum, so it never makes
+    the window wider than the child needs."""
+
+    def __init__(self, child: Gtk.Widget, limit: int):
+        super().__init__()
+        self.limit = limit
+        self.child = child
+        child.set_parent(self)
+
+    def do_measure(self, orientation, for_size):
+        if orientation == Gtk.Orientation.HORIZONTAL:
+            low, nat, _b, _c = self.child.measure(orientation, for_size)
+            return low, max(low, min(nat, self.limit)), -1, -1
+        width = for_size if for_size < 0 else min(for_size, self.limit)
+        low, nat, _b, _c = self.child.measure(orientation, width)
+        return low, nat, -1, -1
+
+    def do_size_allocate(self, width, height, baseline):
+        low = self.child.measure(Gtk.Orientation.HORIZONTAL, -1)[0]
+        inner = max(low, min(width, self.limit))
+        box = Gdk.Rectangle()
+        box.x, box.y = max(0, (width - inner) // 2), 0
+        box.width, box.height = inner, height
+        self.child.size_allocate(box, baseline)
+
+    def do_dispose(self):
+        if self.child is not None:
+            self.child.unparent()
+            self.child = None
+
+
 class NewChatPage(Gtk.Box):
     """The New chat screen. One per window, kept in the stack as
     "new-chat"; open() points it at a project and gives it the focus."""
@@ -231,16 +264,14 @@ class NewChatPage(Gtk.Box):
         self.append(scroller)
 
         column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        column.set_halign(Gtk.Align.CENTER)
-        column.set_size_request(760, -1)
         column.set_margin_top(96)
         column.set_margin_bottom(48)
         column.set_margin_start(32)
         column.set_margin_end(32)
-        clamp = Gtk.Box()
-        clamp.set_halign(Gtk.Align.CENTER)
-        clamp.append(column)
-        scroller.set_child(clamp)
+        # 760 wide where there is room, narrower where there is not: a hard
+        # 760 made the whole window at least that wide, and a tiled window
+        # narrower than that had its terminals cut off on the right.
+        scroller.set_child(Clamp(column, 760 + 64))
 
         self.crumb = _label("", "nc-crumb")
         column.append(self.crumb)

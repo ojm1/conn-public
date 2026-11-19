@@ -929,6 +929,47 @@ def run(window, check, gui, hosts, agent_state, Gtk) -> None:
           found and found[0].endswith("R5GTtVz03mLeyVZRzhDoEcK") and len(found[0]) > 120,
           f"found={found}")
     check("and only that one", len(found) == 1, f"found={found}")
+    for row in (2, 3, 4):
+        check(f"a click on row {row} of it opens the whole link",
+              hosts.link_on_row(wrapped, row) == found[0],
+              hosts.link_on_row(wrapped, row))
+    check("and a click on the first row, matched short, still the whole one",
+          hosts.link_on_row(wrapped, 2, found[0][:60]) == found[0])
+    check("a row with no link is no link",
+          hosts.link_on_row(wrapped, 0) == "")
+    # And through a real terminal, the way ctrl-click asks: VTE's own text
+    # call, its own match, the row from the pointer's height.
+    import types as _types
+    from gi.repository import Vte as _Vte
+    holder = Gtk.Window()
+    term = _Vte.Terminal()
+    term.set_size(80, 12)
+    holder.set_child(term)
+    holder.present()
+    regex = _Vte.Regex.new_for_match(gui.URL_PATTERN, -1, gui.PCRE2_UTF
+                                     | gui.PCRE2_NO_UTF_CHECK
+                                     | gui.PCRE2_MULTILINE)
+    term.match_add_regex(regex, 0)
+    long_url = found[0] + "&code_challenge=" + "x" * 90
+    pieces = [long_url[i:i + 80] for i in range(0, len(long_url), 80)]
+    term.feed("\r\n".join(["  Use the url below to sign in", ""] + pieces
+                           + ["", "  Paste code here >"]).encode())
+    _ctx, _until = gui.GLib.MainContext.default(), time.monotonic() + 3
+    while time.monotonic() < _until and not (
+            term.get_char_height() > 0 and "Paste" in (
+                term.get_text_format(_Vte.Format.TEXT) or "")):
+        _ctx.iteration(False)
+        time.sleep(0.01)
+    fake = _types.SimpleNamespace(term=term)
+    fake._row_at = lambda y: gui.Session._row_at(fake, y)
+    height = term.get_char_height()
+    got = [gui.Session.link_at(fake, 4 * term.get_char_width(),
+                               (row + 0.5) * height)
+           for row in range(2, 2 + len(pieces))]
+    check("ctrl-click on any row of a wrapped link, in a real terminal, "
+          "opens all of it", got == [long_url] * len(pieces),
+          repr([len(g) for g in got]) + f" want {len(long_url)}")
+    holder.destroy()
     prose = "see https://example.com/x, and (https://example.com/y) too\nplain text\n"
     check("ordinary links still come out one each",
           hosts.screen_links(prose) == ["https://example.com/x", "https://example.com/y"],
@@ -2192,6 +2233,9 @@ def chat_list(window, check, gui, hosts, agent_state, Gtk) -> None:
             got = window.mode_buttons["chats"].compute_point(
                 window, Graphene.Point())
             tab_y.append(round(got[1].y) if got and got[0] else None)
+        low = window.stack.measure(Gtk.Orientation.HORIZONTAL, -1)[0]
+        check("no page makes the main area wider than a narrow tiled "
+              "window can show", low < 600, f"min width {low}")
         check("the tabs stay put whichever tab is showing",
               len(set(tab_y)) == 1 and tab_y[0] is not None, repr(tab_y))
         window.set_sidebar_mode("notes")

@@ -848,7 +848,9 @@ class Session(Gtk.Box):
         self._spawn()
 
     def link_at(self, x: float, y: float) -> str:
-        """The URL under the pointer, marked up or not."""
+        """The URL under the pointer, marked up or not -- whole, when tmux
+        delivered it in pieces: a long login link is several rows, and the
+        terminal's own match only ever sees the row the pointer is on."""
         try:
             hyperlink = self.term.check_hyperlink_at(x, y)
         except Exception:
@@ -858,8 +860,22 @@ class Session(Gtk.Box):
         try:
             match, _tag = self.term.check_match_at(x, y)
         except Exception:
-            return ""
-        return match or ""
+            match = None
+        match = match or ""
+        try:
+            visible = self.term.get_text_format(Vte.Format.TEXT)
+            if isinstance(visible, tuple):      # (text, length) on some VTEs
+                visible = visible[0]
+            whole = hosts.link_on_row(visible or "", self._row_at(y), match)
+        except Exception:
+            whole = ""
+        if whole and (not match or match in whole):
+            return whole
+        return match
+
+    def _row_at(self, y: float) -> int:
+        """The row of the visible screen at this height."""
+        return int(y // max(1, self.term.get_char_height()))
 
     def _clicked(self, gesture, _presses, x, y):
         """ctrl-click opens a link; the plain click stays the terminal's.
@@ -1439,6 +1455,12 @@ class Conn(Gtk.ApplicationWindow):
 
         self.stack = Gtk.Stack()
         self.stack.set_transition_type(Gtk.StackTransitionType.NONE)
+        # Each page its own size. Homogeneous (GTK's default) made every
+        # page as wide as the widest -- New chat's column -- so a terminal
+        # in a narrow tiled window was laid out wider than it could be shown
+        # and its right-hand columns were cut off.
+        self.stack.set_hhomogeneous(False)
+        self.stack.set_vhomogeneous(False)
 
         self.placeholder = Gtk.Label(
             label="Pick a session on the left.\n"

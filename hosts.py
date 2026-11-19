@@ -1927,9 +1927,20 @@ def screen_links(screen: str) -> list[str]:
     and continuation is only considered while the line so far is already a
     URL. Two ordinary full-width lines do not meet that.
     """
-    out: list[str] = []
-    buffer = ""
-    for raw in screen.splitlines():
+    found: list[str] = []
+    for url, _first, _last in screen_link_spans(screen):
+        if url not in found:
+            found.append(url)
+    return found
+
+
+def screen_link_spans(screen: str) -> list[tuple[str, int, int]]:
+    """screen_links(), with the rows each URL covers: (url, first, last),
+    rows counted from 0. What lets a click on the second or third row of a
+    wrapped login link open the whole of it."""
+    joined: list[tuple[str, int, int]] = []
+    buffer, first = "", 0
+    for row, raw in enumerate(screen.splitlines()):
         line = raw.rstrip()
         token = line.strip()
         if (buffer and "://" in buffer and token and " " not in token
@@ -1937,18 +1948,27 @@ def screen_links(screen: str) -> list[str]:
             buffer += token
             continue
         if buffer:
-            out.append(buffer)
-        buffer = line
+            joined.append((buffer, first, row - 1))
+        buffer, first = line, row
     if buffer:
-        out.append(buffer)
+        joined.append((buffer, first, len(screen.splitlines()) - 1))
 
-    found: list[str] = []
-    for line in out:
+    spans: list[tuple[str, int, int]] = []
+    for line, start, end in joined:
         for match in URL.finditer(line):
-            url = match.group(0)
-            if url not in found:
-                found.append(url)
-    return found
+            spans.append((match.group(0), start, end))
+    return spans
+
+
+def link_on_row(screen: str, row: int, fragment: str = "") -> str:
+    """The whole URL a click on this row of the screen is on: the one
+    whose rows include it -- the one containing what the terminal itself
+    matched there, when there are several."""
+    hits = [url for url, first, last in screen_link_spans(screen)
+            if first <= row <= last]
+    if fragment:
+        hits = [u for u in hits if fragment in u] or hits
+    return max(hits, key=len) if hits else ""
 
 
 def kill_session(host: str, session: str) -> None:
